@@ -1,7 +1,7 @@
 /* Rotana server-backed application. All mutations require Laravel session + CSRF. */
 'use strict';
 
-let lookup = {}, me = {}, currentOrder = null, table = null, chart = null, modalSave = null, availableRoles = null;
+let lookup = {}, me = {}, currentOrder = null, table = null, chart = null, modalSave = null, availableRoles = null, searchRequest = null, searchTimer = null, searchActiveIndex = -1;
 let ui = window.rotanaUi || {};
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -9,6 +9,12 @@ const bdi = value => `<bdi>${esc(value ?? '—')}</bdi>`;
 const money = value => (Number(value || 0) / 100).toLocaleString('ar-SA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const today = () => new Date().toISOString().slice(0, 10);
 const can = permissionName => me.permissions?.includes(permissionName);
+const timelineDate = value => {
+    if (!value) return 'التوقيت غير متاح';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return new Intl.DateTimeFormat('ar-SA', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+};
 const api = (path, method = 'GET', data) => $.ajax({
     url: '/api/' + path,
     method,
@@ -26,6 +32,16 @@ const statuses = {
     closed: 'مغلق',
     rejected: 'مرفوض',
 };
+const workflowStages = [
+    ['draft', 'مسودة', 'file-pen'],
+    ['accountant', 'مراجعة المحاسب', 'calculator'],
+    ['manager', 'اعتماد المدير', 'user-tie'],
+    ['supervisor', 'اعتماد المشرف', 'user-check'],
+    ['matching', 'مطابقة قبل التحويل', 'file-circle-check'],
+    ['ready', 'جاهز للتحويل', 'money-bill-wave'],
+    ['paid', 'تم التحويل', 'building-columns'],
+    ['closed', 'مغلق', 'lock'],
+];
 const kinds = {
     vehicles: 'السيارات',
     suppliers: 'الموردون',
@@ -47,6 +63,13 @@ const cardStatuses = {
     in_progress: 'قيد الصيانة',
     completed: 'مكتمل',
     closed: 'مغلق',
+};
+const searchEntityLabels = {
+    purchase_orders: 'طلبات الشراء',
+    vehicles: 'السيارات',
+    maintenance_cards: 'كروت الصيانة',
+    suppliers: 'الموردون',
+    items: 'الأصناف',
 };
 const permission = kind => ['vehicles', 'suppliers', 'items'].includes(kind) ? kind + '.manage' : 'masters.manage';
 const dtLanguage = {
@@ -118,6 +141,22 @@ function formData(form) {
     return Object.fromEntries(new FormData(form));
 }
 
+function clearModalErrors(form) {
+    $(form).find('.is-invalid').removeClass('is-invalid').removeAttr('aria-invalid');
+    $(form).find('.modal-field-error').remove();
+}
+
+function applyModalErrors(form, errors = {}) {
+    Object.entries(errors).forEach(([name, messages]) => {
+        const fieldName = name.replace(/\.\d+.*$/, '');
+        const input = $(form).find(`[name="${fieldName}"]`).first();
+        if (!input.length) return;
+        input.addClass('is-invalid').attr('aria-invalid', 'true');
+        input.next('.select2-container').find('.select2-selection').addClass('is-invalid');
+        input.closest('.field').append(`<div class="invalid-feedback modal-field-error d-block">${esc((messages || []).join(' '))}</div>`);
+    });
+}
+
 function head(title, sub = '', actions = '') {
     return `<div class="page-head"><div><div class="breadcrumb-line">الرئيسية / ${esc(title)}</div><h1>${esc(title)}</h1>${sub ? `<p class="subtext">${esc(sub)}</p>` : ''}</div><div class="action-bar">${actions}</div></div>`;
 }
@@ -130,6 +169,7 @@ function openModal(title, body, save) {
     $('#editor .modal-title').text(title);
     $('#editor .modal-body').html(body);
     modalSave = save;
+    $('#editor-form button[type=submit]').show();
     enhance('#editor');
     bootstrap.Modal.getOrCreateInstance('#editor').show();
 }
@@ -178,20 +218,239 @@ function col(data, title, extra = {}) {
     return { data, title, ...extra };
 }
 
+function setSearchExpanded(open) {
+    $('#global-search-input').attr('aria-expanded', open ? 'true' : 'false');
+    $('#global-search-results').prop('hidden', !open);
+}
+
+function renderSearchState(message, icon = 'circle-info') {
+    $('#global-search-results').html(`<div class="global-search-state"><i class="fa-solid fa-${icon}"></i><span>${esc(message)}</span></div>`);
+    searchActiveIndex = -1;
+    setSearchExpanded(true);
+}
+
+function groupedSearchResults(results) {
+    return results.reduce((groups, row) => {
+        (groups[row.type] ||= []).push(row);
+        return groups;
+    }, {});
+}
+
+function renderSearchResults(results) {
+    if (!results.length) {
+        renderSearchState('لا توجد نتائج مطابقة', 'magnifying-glass');
+        return;
+    }
+
+    const groups = groupedSearchResults(results);
+    $('#global-search-results').html(`<div class="global-search-results-head"><span><i class="fa-solid fa-magnifying-glass"></i> نتائج البحث</span><small>${results.length} نتيجة</small></div>` + Object.entries(groups).map(([type, rows]) => `
+        <div class="global-search-group">
+            <div class="global-search-group-title"><span>${esc(searchEntityLabels[type] || type)}</span><b>${rows.length}</b></div>
+            ${rows.map(row => `<a class="global-search-option" role="option" href="${esc(row.url)}" data-search-option tabindex="-1">
+                <i class="fa-solid fa-${esc(row.icon || 'circle')}"></i>
+                <span><strong>${esc(row.label)}</strong><small>${esc(row.secondary || '')}</small></span>
+                <i class="fa-solid fa-arrow-left global-search-option-arrow" aria-hidden="true"></i>
+            </a>`).join('')}
+        </div>
+    `).join(''));
+    searchActiveIndex = -1;
+    setSearchExpanded(true);
+}
+
+function moveSearchSelection(delta) {
+    const options = $('[data-search-option]');
+    if (!options.length) return;
+    searchActiveIndex = (searchActiveIndex + delta + options.length) % options.length;
+    options.removeClass('active').attr('aria-selected', 'false');
+    const active = options.eq(searchActiveIndex).addClass('active').attr('aria-selected', 'true');
+    active[0].scrollIntoView({ block: 'nearest' });
+}
+
+function closeGlobalSearch() {
+    if (searchRequest) searchRequest.abort();
+    clearTimeout(searchTimer);
+    setSearchExpanded(false);
+    searchActiveIndex = -1;
+}
+
+function performGlobalSearch(term) {
+    if (searchRequest) searchRequest.abort();
+    renderSearchState('جارٍ البحث...', 'spinner');
+    searchRequest = api('search', 'GET', { q: term })
+        .done(response => renderSearchResults(response.results || []))
+        .fail(xhr => {
+            if (xhr.statusText !== 'abort') renderSearchState('تعذر إكمال البحث الآن', 'triangle-exclamation');
+        })
+        .always(() => {
+            searchRequest = null;
+        });
+}
+
+function initGlobalSearch() {
+    const input = $('#global-search-input');
+    const clear = $('#global-search-clear');
+    if (!input.length || input.data('ready')) return;
+    input.data('ready', true);
+
+    input.on('input', function () {
+        const term = this.value.trim();
+        clear.prop('hidden', !term);
+        clearTimeout(searchTimer);
+        if (term.length < 2) {
+            closeGlobalSearch();
+            return;
+        }
+        searchTimer = setTimeout(() => performGlobalSearch(term.slice(0, 80)), 350);
+    }).on('keydown', function (event) {
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            moveSearchSelection(1);
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            moveSearchSelection(-1);
+        } else if (event.key === 'Enter' && searchActiveIndex >= 0) {
+            event.preventDefault();
+            $('[data-search-option]').eq(searchActiveIndex)[0].click();
+        } else if (event.key === 'Escape') {
+            closeGlobalSearch();
+        }
+    });
+
+    clear.on('click', function () {
+        input.val('').trigger('input').focus();
+    });
+    $('#global-search-results').on('click', '[data-search-option]', closeGlobalSearch);
+    $(document).on('pointerdown.globalSearch', event => {
+        if (!$(event.target).closest('.global-search').length) closeGlobalSearch();
+    });
+}
+
 function statusLabel(value) {
     return statuses[value] || 'حالة غير معروفة';
+}
+
+function workflowSteps(status) {
+    const currentIndex = workflowStages.findIndex(([key]) => key === status);
+    const isRejected = status === 'rejected';
+    const activeStage = workflowStages[Math.max(currentIndex, 0)];
+    const progress = isRejected ? 0 : Math.round(((currentIndex + 1) / workflowStages.length) * 100);
+    const stages = workflowStages.map(([key, label, icon], index) => {
+        const state = isRejected ? '' : index < currentIndex ? ' is-complete' : index === currentIndex ? ' is-current' : '';
+        const marker = index < currentIndex && !isRejected ? 'check' : icon;
+        return `<li class="workflow-step${state}" ${index === currentIndex ? 'aria-current="step"' : ''}>
+            <span class="workflow-step-icon"><i class="fa-solid fa-${marker}"></i></span>
+            <span class="workflow-step-copy"><b>${esc(label)}</b><small>${index < currentIndex && !isRejected ? 'مكتملة' : index === currentIndex ? 'المرحلة الحالية' : 'بانتظار التنفيذ'}</small></span>
+        </li>`;
+    }).join('');
+    const rejection = isRejected ? `<div class="workflow-rejected"><i class="fa-solid fa-ban"></i><span><b>تم رفض الطلب</b><small>يمكن إعادة الطلب للتعديل وإرساله من جديد عند الحاجة.</small></span></div>` : '';
+    return `<section class="panel workflow-steps workflow-timeline" aria-label="مراحل سير طلب الشراء">
+        <header class="workflow-summary">
+            <div class="workflow-heading"><span><i class="fa-solid fa-route"></i> مسار الطلب</span><small>${isRejected ? 'مسار متوقف' : `المرحلة الحالية: ${esc(statusLabel(status))}`}</small></div>
+            <div class="workflow-status-card${isRejected ? ' is-rejected' : ''}"><span class="workflow-status-icon"><i class="fa-solid fa-${isRejected ? 'ban' : activeStage[2]}"></i></span><span><small>${isRejected ? 'حالة الطلب' : 'أنت الآن في'}</small><b>${isRejected ? 'تم رفض الطلب' : esc(activeStage[1])}</b></span><strong>${progress}%</strong></div>
+        </header>
+        <div class="workflow-progress" aria-hidden="true"><span style="width:${progress}%"></span></div>
+        ${rejection}<ol>${stages}</ol>
+    </section>`;
+}
+
+function orderTimeline(order) {
+    const actionMeta = {
+        'orders.submitted': ['تم إرسال الطلب للمراجعة', 'paper-plane', 'sent'],
+        'orders.review': ['تمت مراجعة المحاسب', 'calculator', 'approved'],
+        'orders.approve_manager': ['تم اعتماد المدير', 'user-tie', 'approved'],
+        'orders.approve_supervisor': ['تم اعتماد المشرف', 'user-check', 'approved'],
+        'orders.return': ['أُعيد الطلب للتعديل', 'rotate-left', 'returned'],
+        'orders.reject': ['تم رفض الطلب', 'ban', 'rejected'],
+        'orders.matched': ['تم اعتماد المطابقة', 'check-double', 'approved'],
+        'orders.closed': ['تم إغلاق الطلب', 'lock', 'closed'],
+    };
+    const entries = [{
+        id: 'created',
+        action: 'created',
+        from_status: null,
+        to_status: 'draft',
+        created_at: order.created_at,
+        user: order.creator,
+        reason: null,
+    }, ...(order.approvals || [])]
+        .filter(entry => entry.created_at)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    const item = (entry, index) => {
+        const meta = entry.action === 'created'
+            ? ['تم إنشاء الطلب كمسودة', 'file-circle-plus', 'created']
+            : actionMeta[entry.action] || ['تم تحديث مسار الطلب', 'clock-rotate-left', 'updated'];
+        const transition = entry.from_status && entry.to_status
+            ? `<span class="order-timeline-transition">${esc(statusLabel(entry.from_status))}<i class="fa-solid fa-arrow-left"></i>${esc(statusLabel(entry.to_status))}</span>`
+            : `<span class="order-timeline-transition">${esc(statusLabel(entry.to_status || 'draft'))}</span>`;
+        return `<article class="order-timeline-item is-${meta[2]}${index > 7 ? ' is-extra' : ''}">
+            <div class="order-timeline-marker"><i class="fa-solid fa-${meta[1]}"></i></div>
+            <div class="order-timeline-card">
+                <div class="order-timeline-card-head"><div><h3>${meta[0]}</h3>${transition}</div><time datetime="${esc(entry.created_at)}"><i class="fa-regular fa-clock"></i>${esc(timelineDate(entry.created_at))}</time></div>
+                <div class="order-timeline-actor"><span class="order-timeline-avatar"><i class="fa-solid fa-user"></i></span><span>${esc(entry.user?.name || 'مستخدم النظام')}</span></div>
+                ${entry.reason ? `<div class="order-timeline-reason"><i class="fa-solid fa-comment-dots"></i><span>${esc(entry.reason)}</span></div>` : ''}
+            </div>
+        </article>`;
+    };
+    const extraCount = Math.max(entries.length - 8, 0);
+    return `<section class="panel order-timeline" aria-labelledby="order-timeline-title">
+        <header class="order-timeline-head">
+            <div><span class="order-timeline-kicker"><i class="fa-solid fa-timeline"></i>متابعة موثّقة</span><h2 id="order-timeline-title" class="section-title">سجل الدورة والاعتمادات</h2><p>تسلسل زمني لأحدث إجراءات الطلب والقرارات المرتبطة به.</p></div>
+            <span class="order-timeline-count"><b>${entries.length}</b> ${entries.length === 1 ? 'حدث' : 'أحداث'}</span>
+        </header>
+        <div class="order-timeline-list">${entries.map(item).join('')}</div>
+        ${extraCount ? `<button class="order-timeline-toggle" type="button" aria-expanded="false"><i class="fa-solid fa-chevron-down"></i><span>عرض ${extraCount} أحداث سابقة</span></button>` : ''}
+    </section>`;
 }
 
 function movementLabel(value) {
     return ui.movement_type_labels?.[value] || movementTypes[value] || 'حركة غير معروفة';
 }
 
+function movementBadge(value) {
+    const key = Object.prototype.hasOwnProperty.call(movementTypes, value) ? value : 'unknown';
+    return `<span class="inventory-badge inventory-movement-${key}">${esc(movementLabel(value))}</span>`;
+}
+
+function stockStateBadge(quantity, minimum) {
+    const qty = Number(quantity || 0);
+    const min = Number(minimum || 0);
+    if (qty < 0) return '<span class="inventory-badge inventory-stock-negative">رصيد سالب</span>';
+    if (qty < min) return '<span class="inventory-badge inventory-stock-low">أقل من الحد</span>';
+    return '<span class="inventory-badge inventory-stock-ok">متاح</span>';
+}
+
+function activeBadge(value) {
+    return value ? '<span class="state-badge state-active">نشط</span>' : '<span class="state-badge state-inactive">غير نشط</span>';
+}
+
+function quantityText(value) {
+    return (Number(value || 0) / 1000).toLocaleString('ar-SA', { maximumFractionDigits: 3 });
+}
+
 function cardStatusLabel(value) {
     return ui.card_status_labels?.[value] || cardStatuses[value] || 'حالة غير معروفة';
 }
 
+function cardStatusBadge(value) {
+    const key = Object.prototype.hasOwnProperty.call(cardStatuses, value) ? value : 'unknown';
+    return `<span class="card-status card-status-${key}">${esc(cardStatusLabel(value))}</span>`;
+}
+
 function renderRolePills(roles) {
-    return roles.map(role => `<span class="badge">${esc(roleLabel(role.name || role))}</span>`).join(' ');
+    return roles.map(role => `<span class="admin-pill role-pill">${esc(roleLabel(role.name || role))}</span>`).join(' ');
+}
+
+function userStatusBadge(value) {
+    return value ? '<span class="state-badge state-active">نشط</span>' : '<span class="state-badge state-inactive">معطل</span>';
+}
+
+function branchScopeBadge(value) {
+    return value ? '<span class="admin-pill scope-pill">جميع الفروع</span>' : '<span class="admin-pill scope-pill">فروع محددة</span>';
+}
+
+function activityBadge(value) {
+    return `<span class="admin-pill activity-pill">${esc(value || 'نشاط')}</span>`;
 }
 
 function nav() {
@@ -225,7 +484,9 @@ async function route() {
         table = null;
     }
 
-    const hash = location.hash.slice(1) || 'dashboard';
+    const [hash, queryString = ''] = (location.hash.slice(1) || 'dashboard').split('?');
+    const requestedCategory = new URLSearchParams(queryString).get('category');
+    const category = Object.hasOwn(lookup.categories, requestedCategory) ? requestedCategory : '';
     $('.nav-item').removeClass('active').filter(`[href="#${hash.split('/')[0]}"]`).addClass('active');
     $('#sidebar').removeClass('open');
 
@@ -234,15 +495,16 @@ async function route() {
             return await detail(hash.split('/')[1]);
         }
         if (hash === 'new') {
-            return orderForm();
+            return orderForm(null, category);
         }
         if (hash.startsWith('master/')) {
-            return masters(hash.split('/')[1]);
+            const [, kind, id] = hash.split('/');
+            return masters(kind, id);
         }
 
         switch (hash) {
             case 'dashboard': return await dashboard();
-            case 'orders': return orders(false);
+            case 'orders': return orders(false, category);
             case 'reports': return orders(true);
             case 'inventory': return inventory();
             case 'cards': return cards();
@@ -262,47 +524,69 @@ async function dashboard() {
     const categories = Object.entries(lookup.categories).map(([key, label], index) => `
         <article class="service-card" style="--accent:${['#0866ff', '#00a5b4', '#e28b36'][index % 3]}">
             <div class="service-top">
-                <div>
+                <div class="service-copy">
                     <h2>${esc(label)}</h2>
                     <p>طلبات مرتبطة، اعتماد متدرج، ومرفقات متابعة جاهزة.</p>
                 </div>
                 <div class="service-icon"><i class="fa-solid fa-${['screwdriver-wrench', 'car-burst', 'gears', 'bolt', 'building', 'boxes-stacked', 'file-invoice'][index] || 'folder-open'}"></i></div>
             </div>
-            <a href="#orders" data-category="${key}">عرض الطلبات</a>
+            <p class="service-count"><strong>${Number(data.category_counts?.[key] || 0)}</strong> طلب</p>
+            <div class="service-actions">
+                ${can('orders.view') ? `<a class="service-orders" href="#orders?category=${encodeURIComponent(key)}">عرض الطلبات</a>` : ''}
+                ${can('orders.create') ? `<a class="service-add" href="#new?category=${encodeURIComponent(key)}" title="إضافة طلب: ${esc(label)}" aria-label="إضافة طلب: ${esc(label)}"><i class="fa-solid fa-plus" aria-hidden="true"></i></a>` : ''}
+            </div>
         </article>
     `).join('');
 
     $('#content').html(
         head('لوحة التحكم', 'متابعة مؤشرات التشغيل والمشتريات والصيانة من شاشة واحدة.', can('orders.create') ? '<a href="#new" class="btn btn-primary"><i class="fa-solid fa-plus"></i>طلب شراء جديد</a>' : '') +
-        `<div class="stats">${[
+        `<section class="dashboard-hero"><div><span class="dashboard-eyebrow"><i class="fa-solid fa-sparkles"></i> نظرة تشغيلية مباشرة</span><h2>كل ما يحتاج المتابعة، في مكان واحد.</h2><p>راقب سير الطلبات والسيولة والأصول من ملخص حي وواضح.</p></div><div class="dashboard-hero-pulse"><i class="fa-solid fa-chart-line"></i><span>بيانات محدثة</span></div></section>
+        <div class="stats">${[
             [Object.values(data.counts).reduce((sum, count) => sum + Number(count), 0), 'إجمالي الطلبات', 'file-invoice'],
             [money(data.order_total_minor), 'قيمة الطلبات', 'sack-dollar'],
             [money(data.paid_minor), 'إجمالي المدفوع', 'money-bill-transfer'],
             [data.vehicles, 'السيارات النشطة', 'car'],
-        ].map(stat => `<div class="stat"><i class="fa-solid fa-${stat[2]}"></i><div><strong>${stat[0]}</strong><span>${stat[1]}</span></div></div>`).join('')}</div>
+        ].map(stat => `<div class="stat dashboard-stat"><i class="fa-solid fa-${stat[2]}"></i><div class="dashboard-stat-copy"><strong>${stat[0]}</strong><span>${stat[1]}</span></div></div>`).join('')}</div>
         <div class="service-grid">${categories}</div>
         <div class="dashboard-bottom">
-            <section class="panel">
-                <h2 class="section-title">توزيع حالات الطلبات</h2>
+            <section class="panel dashboard-chart-panel">
+                <h2 class="section-title"><span><i class="fa-solid fa-chart-column"></i> توزيع حالات الطلبات</span><small>نظرة حسب الحالة</small></h2>
                 <div id="chart"></div>
             </section>
-            <section class="panel">
-                <h2 class="section-title">ملخص المتابعة</h2>
-                <p>كروت الصيانة المفتوحة: <b>${data.cards}</b></p>
-                <p>أصناف أقل من حد إعادة الطلب: <b>${data.low_stock}</b></p>
-                ${(data.recent || []).length ? data.recent.map(order => `<a class="quick-link" href="#order/${order.id}"><span><i class="fa-solid fa-file-lines"></i> ${bdi(order.number)}</span><small>${esc(statusLabel(order.status))}</small></a>`).join('') : '<p class="subtext">لا توجد طلبات حديثة.</p>'}
+            <section class="panel dashboard-followup-panel">
+                <h2 class="section-title"><span><i class="fa-solid fa-bolt"></i> ملخص المتابعة</span><small>يتطلب انتباهك</small></h2>
+                <div class="dashboard-followup-summary">
+                    <p>كروت الصيانة المفتوحة: <b>${data.cards}</b></p>
+                    <p>أصناف أقل من حد إعادة الطلب: <b>${data.low_stock}</b></p>
+                </div>
+                <div class="dashboard-recent-list">
+                    ${(data.recent || []).length ? data.recent.map(order => `<a class="quick-link" href="#order/${order.id}"><span><i class="fa-solid fa-file-lines"></i> ${bdi(order.number)}</span><small>${esc(statusLabel(order.status))}</small></a>`).join('') : '<p class="subtext">لا توجد طلبات حديثة.</p>'}
+                </div>
             </section>
         </div>`
     );
 
     chart = new ApexCharts(document.querySelector('#chart'), {
-        chart: { type: 'bar', height: 300, toolbar: { show: false }, fontFamily: 'Cairo, system-ui, sans-serif' },
+        chart: { type: 'bar', height: 320, toolbar: { show: false }, fontFamily: 'Cairo, system-ui, sans-serif' },
         series: [{ name: 'الطلبات', data: Object.values(data.counts).map(Number) }],
-        xaxis: { categories: Object.keys(data.counts).map(key => statusLabel(key)), labels: { style: { fontFamily: 'Cairo, system-ui, sans-serif' } } },
+        xaxis: {
+            categories: Object.keys(data.counts).map(key => statusLabel(key)),
+            labels: {
+                rotate: -25,
+                trim: false,
+                hideOverlappingLabels: false,
+                style: { fontFamily: 'Cairo, system-ui, sans-serif', fontSize: '12px' },
+            },
+        },
         yaxis: { labels: { style: { fontFamily: 'Cairo, system-ui, sans-serif' } } },
         tooltip: { theme: 'light' },
         colors: ['#00a5b4'],
         dataLabels: { enabled: false },
+        grid: { padding: { left: 12, right: 12, bottom: 6 } },
+        responsive: [
+            { breakpoint: 1200, options: { chart: { height: 310 } } },
+            { breakpoint: 768, options: { chart: { height: 300 }, xaxis: { labels: { rotate: -35 } } } },
+        ],
     });
     chart.render();
 }
@@ -311,34 +595,38 @@ function excelButtons(kind) {
     return `${can('excel.export') ? `<a class="btn btn-light" id="export-link" href="/api/excel/export/${kind}"><i class="fa-solid fa-file-excel"></i>تصدير إكسل</a>` : ''}${kind !== 'orders' && can('excel.import') && can(permission(kind)) ? `<a class="btn btn-light" href="/api/excel/template/${kind}"><i class="fa-solid fa-download"></i>تحميل نموذج الاستيراد</a>${button('استيراد إكسل', 'import', 'file-import', `data-kind="${kind}"`)}` : ''}`;
 }
 
-function orders(report = false) {
+function orders(report = false, category = '') {
     $('#content').html(
         head(report ? 'تقارير الطلبات' : 'طلبات الشراء', 'متابعة الدورة من تسجيل الطلب إلى المطابقة والدفع.', (!report && can('orders.create') ? '<a class="btn btn-primary" href="#new"><i class="fa-solid fa-plus"></i>طلب شراء جديد</a>' : '') + excelButtons('orders')) +
-        `<div class="panel">
+        `<div class="panel po-filter-panel">
             <form id="filters" class="form-grid">
                 ${select('status', 'الحالة', Object.entries(statuses).map(([id, name]) => ({ id, name })), '', '', { placeholder: 'كل الحالات' })}
                 ${select('branch_id', 'الفرع', lookup.branches, '', '', { placeholder: 'كل الفروع' })}
+                ${select('supplier_id', 'المورد', lookup.suppliers, '', 'suppliers', { placeholder: 'كل الموردين' })}
                 ${select('vehicle_id', 'السيارة', lookup.vehicles, '', '', { placeholder: 'كل السيارات' })}
-                ${select('category', 'نوع الطلب', Object.entries(lookup.categories).map(([id, name]) => ({ id, name })), '', '', { placeholder: 'كل الأنواع' })}
+                ${select('category', 'نوع الطلب', Object.entries(lookup.categories).map(([id, name]) => ({ id, name })), category, '', { placeholder: 'كل الأنواع' })}
                 ${field('from', 'من تاريخ', '', 'date', false)}
                 ${field('to', 'إلى تاريخ', '', 'date', false)}
                 <div class="field"><label>&nbsp;</label><button class="btn btn-light w-100"><i class="fa-solid fa-filter"></i>تطبيق التصفية</button></div>
             </form>
         </div>
-        <div class="panel" id="grid-area"></div>`
+        <div class="panel po-table-panel" id="grid-area"></div>`
     );
 
     enhance();
-    grid('orders', [
-        col('number', 'رقم الطلب', { render: value => bdi(value) }),
-        col('date', 'التاريخ'),
+    $('#export-link').attr('href', '/api/excel/export/orders?' + new URLSearchParams({ category }));
+    grid('orders?' + new URLSearchParams({ category }), [
+        col('number', 'رقم الطلب', { className: 'po-code', render: value => bdi(value) }),
+        col('date', 'التاريخ', { className: 'po-date', render: value => bdi(value) }),
         col('branch_name', 'الفرع'),
         col('supplier_name', 'المورد'),
-        col('vehicle_plate', 'السيارة', { render: value => value ? bdi(value) : '—' }),
-        col('total', 'الإجمالي'),
-        col('status_label', 'الحالة'),
-        { data: 'id', title: 'التفاصيل', orderable: false, searchable: false, render: id => `<a class="btn btn-light" href="#order/${Number(id)}"><i class="fa-solid fa-eye"></i>عرض</a>` },
+        col('vehicle_plate', 'السيارة', { className: 'po-code', render: value => value ? bdi(value) : '—' }),
+        col('total', 'الإجمالي', { name: 'total', className: 'po-money', render: value => bdi(value) }),
+        col('status_label', 'الحالة', { name: 'status_label', className: 'po-status-cell', render: (value, type, row) => type === 'display' ? `<span class="badge po-status po-status-${esc(row.status)}">${esc(value)}</span>` : value }),
+        { data: 'id', title: 'التفاصيل', className: 'po-actions', orderable: false, searchable: false, render: (id, type, row) => `<a class="btn btn-light po-action" href="#order/${Number(id)}" title="عرض تفاصيل ${esc(row.number)}" aria-label="عرض تفاصيل الطلب ${esc(row.number)}"><i class="fa-solid fa-eye"></i><span>عرض</span></a>` },
     ]);
+    $('#grid-area .table-responsive').addClass('po-table-wrap');
+    $('#records').addClass('po-table').attr('aria-label', report ? 'جدول تقارير الطلبات' : 'جدول طلبات الشراء');
 
     $('#filters').on('submit', function (event) {
         event.preventDefault();
@@ -348,76 +636,214 @@ function orders(report = false) {
     });
 }
 
+const poOptionLabel = row => row.label || row.name || row.plate || row.title || row.code || row.email;
+const poRequiredLabel = required => required ? ' <span class="required" aria-label="مطلوب">*</span><span class="po-required-text">مطلوب</span>' : ' <span class="subtext">اختياري</span>';
+const poError = name => `<div class="invalid-feedback po-error" data-error-for="${esc(name)}"></div>`;
+
+function poField(name, label, value = '', type = 'text', required = true, extra = '') {
+    return `<div class="field po-field" data-po-field="${esc(name)}"><label for="f-${name}">${label}${poRequiredLabel(required)}</label><input id="f-${name}" class="form-control" name="${name}" type="${type}" value="${esc(value)}" ${required ? 'required' : ''} ${type === 'number' ? 'step="any" min="0"' : ''} ${extra}>${poError(name)}</div>`;
+}
+
+function poTextarea(name, label, value = '', required = false, rows = 3) {
+    return `<div class="field po-field" data-po-field="${esc(name)}"><label for="f-${name}">${label}${poRequiredLabel(required)}</label><textarea id="f-${name}" class="form-control" name="${name}" rows="${rows}" ${required ? 'required' : ''}>${esc(value)}</textarea>${poError(name)}</div>`;
+}
+
+function poSelect(name, label, rows, value = '', quick = '', options = {}) {
+    const placeholder = options.placeholder || 'اختر من القائمة';
+    const required = options.required !== false;
+    return `<div class="field po-field" data-po-field="${esc(name)}"><label for="f-${name}">${label}${poRequiredLabel(required)}</label><div class="picker"><select id="f-${name}" class="form-select searchable" name="${name}" ${required ? 'required' : ''}><option value="">${placeholder}</option>${rows.map(row => `<option value="${esc(row.id)}" ${String(row.id) === String(value) ? 'selected' : ''}>${esc(poOptionLabel(row))}</option>`).join('')}</select>${quick && can(permission(quick)) ? `<button type="button" class="quick-add" data-quick="${quick}" data-target="${name}" aria-label="إضافة ${esc(label)}"><i class="fa-solid fa-plus"></i>إضافة</button>` : ''}</div>${poError(name)}</div>`;
+}
+
+function poLineFieldError(index, fieldName) {
+    return poError(`lines.${index}.${fieldName}`);
+}
+
+function reindexOrderLineErrors() {
+    $('#lines tr').each(function (index) {
+        ['item_id', 'quantity', 'unit_price'].forEach(fieldName => {
+            $(this).find(`[data-error-for$=".${fieldName}"]`).attr('data-error-for', `lines.${index}.${fieldName}`);
+        });
+    });
+}
+
+function poLineTotal(row) {
+    const quantity = Number($(row).find('[name=quantity]').val() || 0);
+    const price = Number($(row).find('[name=unit_price]').val() || 0);
+    return quantity * price;
+}
+
+function refreshOrderTotals() {
+    const subtotal = $('#lines tr').toArray().reduce((sum, row) => sum + poLineTotal(row), 0);
+    const taxPercent = Number($('#order-form [name=tax_percent]').val() || 0);
+    const tax = subtotal * taxPercent / 100;
+    $('#po-subtotal').text(subtotal.toLocaleString('ar-SA', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    $('#po-tax').text(tax.toLocaleString('ar-SA', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    $('#po-total').text((subtotal + tax).toLocaleString('ar-SA', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+}
+
+function updateLineDisplay(row) {
+    const selected = $(row).find('[name=item_id] option:selected').text() || '—';
+    $(row).find('.po-line-description').text(selected.trim() || '—');
+    $(row).find('.po-line-total').text(poLineTotal(row).toLocaleString('ar-SA', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    refreshOrderTotals();
+}
+
+function clearOrderFieldError(fieldKey) {
+    const errorNode = $(`[data-error-for="${fieldKey.replace(/"/g, '\\"')}"]`);
+    errorNode.text('').hide();
+    const fieldNode = fieldKey.startsWith('lines.')
+        ? errorNode.closest('tr').find(`[name=${fieldKey.split('.').pop() === 'item_id' ? 'item_id' : fieldKey.split('.').pop()}]`)
+        : $(`#order-form [name="${fieldKey}"]`);
+    fieldNode.removeClass('is-invalid').attr('aria-invalid', 'false');
+    if (fieldNode.hasClass('searchable')) {
+        fieldNode.next('.select2-container').find('.select2-selection').removeClass('is-invalid');
+    }
+}
+
+function clearOrderErrors() {
+    $('#order-errors').prop('hidden', true).empty();
+    $('#order-form .po-error').text('').hide();
+    $('#order-form .is-invalid').removeClass('is-invalid').attr('aria-invalid', 'false');
+}
+
+function applyOrderErrors(errors = {}) {
+    clearOrderErrors();
+    const summary = [];
+    Object.entries(errors).forEach(([key, messages]) => {
+        const message = [].concat(messages).filter(Boolean).join(' ');
+        const target = $(`[data-error-for="${key.replace(/"/g, '\\"')}"]`);
+        let fieldNode = key.startsWith('lines.')
+            ? target.closest('tr').find(`[name=${key.split('.').pop() === 'item_id' ? 'item_id' : key.split('.').pop()}]`)
+            : $(`#order-form [name="${key}"]`);
+        if (target.length) {
+            target.text(message).show();
+            fieldNode.addClass('is-invalid').attr('aria-invalid', 'true');
+            if (fieldNode.hasClass('searchable')) {
+                fieldNode.next('.select2-container').find('.select2-selection').addClass('is-invalid');
+            }
+        }
+        summary.push(message || key);
+    });
+    if (summary.length) {
+        $('#order-errors').html(summary.map(message => `<div>${esc(message)}</div>`).join('')).prop('hidden', false);
+    }
+    const firstInvalid = $('#order-form .is-invalid').first();
+    if (firstInvalid.length) {
+        firstInvalid[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
+        const focusTarget = firstInvalid.hasClass('searchable') ? firstInvalid.next('.select2-container').find('.select2-selection') : firstInvalid;
+        focusTarget.trigger('focus');
+    }
+}
+
 function addLine(line = {}) {
+    const index = $('#lines tr').length;
     const row = $(`
-        <tr>
-            <td>${select('item', 'الصنف', lookup.items, line.item_id, 'items')}</td>
-            <td><input aria-label="الكمية" name="quantity" class="form-control" type="number" min="0.001" step="0.001" required value="${line.quantity_milli ? line.quantity_milli / 1000 : 1}"></td>
-            <td><input aria-label="سعر الوحدة" name="price" class="form-control" type="number" min="0" step="0.01" required value="${line.unit_price_minor ? line.unit_price_minor / 100 : 0}"></td>
-            <td><button type="button" class="btn btn-light remove-line" aria-label="حذف البند"><i class="fa-solid fa-trash"></i></button></td>
+        <tr class="po-line-row">
+            <td data-label="الصنف">${poSelect('item_id', 'الصنف', lookup.items, line.item_id, 'items')}${poLineFieldError(index, 'item_id')}</td>
+            <td data-label="الوصف"><span class="po-line-description">—</span></td>
+            <td data-label="الكمية"><input aria-label="الكمية" name="quantity" class="form-control" type="number" min="0.001" step="0.001" required value="${line.quantity_milli ? line.quantity_milli / 1000 : 1}">${poLineFieldError(index, 'quantity')}</td>
+            <td data-label="سعر الوحدة"><input aria-label="سعر الوحدة" name="unit_price" class="form-control" type="number" min="0" step="0.01" required value="${line.unit_price_minor ? line.unit_price_minor / 100 : 0}">${poLineFieldError(index, 'unit_price')}</td>
+            <td data-label="الإجمالي"><bdi class="po-line-total">0.00</bdi></td>
+            <td data-label="إجراء"><button type="button" class="btn btn-light remove-line" aria-label="حذف البند"><i class="fa-solid fa-trash"></i><span class="visually-hidden">حذف البند</span></button></td>
         </tr>
     `);
     $('#lines').append(row);
+    reindexOrderLineErrors();
     enhance(row);
+    updateLineDisplay(row);
 }
 
-function orderForm(order = null) {
+function orderForm(order = null, category = '') {
     currentOrder = order;
     $('#content').html(
         head(order ? 'تعديل ' + order.number : 'طلب شراء جديد', 'أدخل بيانات الطلب والبنود ثم احفظ المسودة قبل الإرسال.') +
         `<form id="order-form">
-            <section class="panel">
+            <div id="order-errors" class="alert alert-danger po-form-errors" role="alert" hidden></div>
+            <section class="panel po-form-panel">
                 <h2 class="section-title"><span><i class="fa-solid fa-file-invoice"></i>بيانات الطلب</span></h2>
-                <div class="form-grid">
-                    ${select('category', 'نوع الطلب', Object.entries(lookup.categories).map(([id, name]) => ({ id, name })), order?.category || 'maintenance')}
-                    ${field('date', 'التاريخ', order?.date || today(), 'date')}
-                    ${select('priority', 'الأولوية', [{ id: 'normal', name: 'عادي' }, { id: 'urgent', name: 'عاجل' }, { id: 'critical', name: 'عاجل جدًا' }], order?.priority || 'normal')}
-                    ${select('branch_id', 'الفرع', lookup.branches, order?.branch_id, 'branches')}
-                    ${select('cost_center_id', 'مركز التكلفة', lookup.cost_centers, order?.cost_center_id, 'cost-centers')}
-                    ${select('supplier_id', 'المورد', lookup.suppliers, order?.supplier_id, 'suppliers')}
-                    ${select('vehicle_id', 'السيارة', lookup.vehicles, order?.vehicle_id, 'vehicles')}
-                    ${select('warehouse_id', 'مخزن التوريد', lookup.warehouses, order?.warehouse_id, 'warehouses')}
-                    ${field('maintenance_card_id', 'رقم كارت الصيانة الداخلي', order?.maintenance_card_id || '', 'number', false)}
-                    ${field('quote_number', 'رقم عرض السعر', order?.quote_number || '', 'text', false)}
-                    ${field('tax_percent', 'نسبة الضريبة', order ? order.tax_basis_points / 100 : 15, 'number')}
-                    ${textareaField('notes', 'ملاحظات الطلب', order?.notes || '', false, 4)}
+                <div class="form-grid po-form-grid">
+                    ${poSelect('category', 'نوع الطلب', Object.entries(lookup.categories).map(([id, name]) => ({ id, name })), order?.category || category || 'maintenance')}
+                    ${poField('date', 'التاريخ', order?.date || today(), 'date')}
+                    ${poSelect('priority', 'الأولوية', [{ id: 'normal', name: 'عادي' }, { id: 'urgent', name: 'عاجل' }, { id: 'critical', name: 'عاجل جدًا' }], order?.priority || 'normal')}
+                    ${poField('quote_number', 'رقم عرض السعر', order?.quote_number || '', 'text', false)}
                 </div>
             </section>
-            <section class="panel">
-                <h2 class="section-title">بنود الطلب ${button('إضافة بند', 'line-add')}</h2>
-                <div class="table-responsive">
-                    <table class="table">
-                        <thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>إجراء</th></tr></thead>
+            <section class="panel po-form-panel">
+                <h2 class="section-title"><span><i class="fa-solid fa-sitemap"></i>الفرع والأطراف</span></h2>
+                <div class="form-grid po-form-grid">
+                    ${poSelect('branch_id', 'الفرع', lookup.branches, order?.branch_id, 'branches')}
+                    ${poSelect('cost_center_id', 'مركز التكلفة', lookup.cost_centers, order?.cost_center_id, 'cost-centers')}
+                    ${poSelect('supplier_id', 'المورد', lookup.suppliers, order?.supplier_id, 'suppliers')}
+                    ${poSelect('vehicle_id', 'السيارة', lookup.vehicles, order?.vehicle_id, 'vehicles', { required: false })}
+                    ${poSelect('warehouse_id', 'مخزن التوريد', lookup.warehouses, order?.warehouse_id, 'warehouses', { required: false })}
+                    ${poField('maintenance_card_id', 'رقم كارت الصيانة الداخلي', order?.maintenance_card_id || '', 'number', false)}
+                </div>
+            </section>
+            <section class="panel po-form-panel">
+                <h2 class="section-title"><span><i class="fa-solid fa-list-check"></i>بنود الطلب</span>${button('إضافة بند', 'line-add')}</h2>
+                <div class="table-responsive po-lines-wrap">
+                    <table class="table po-lines-table">
+                        <thead><tr><th>الصنف</th><th>الوصف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th><th>إجراء</th></tr></thead>
                         <tbody id="lines"></tbody>
                     </table>
                 </div>
-                <p class="subtext">يحتسب الخادم الإجمالي والضريبة بعد الحفظ، ويمكن إرفاق المستندات من شاشة تفاصيل المسودة.</p>
             </section>
-            <button class="btn btn-primary" type="submit"><i class="fa-solid fa-floppy-disk"></i>حفظ المسودة والمتابعة</button>
+            <section class="panel po-form-panel po-summary-panel">
+                <h2 class="section-title"><span><i class="fa-solid fa-calculator"></i>الملاحظات والإجمالي</span></h2>
+                <div class="form-grid po-form-grid">
+                    ${poField('tax_percent', 'نسبة الضريبة', order ? order.tax_basis_points / 100 : 15, 'number')}
+                    ${poTextarea('notes', 'ملاحظات الطلب', order?.notes || '', false, 4)}
+                    <div class="po-totals" aria-live="polite">
+                        <span>قبل الضريبة <bdi id="po-subtotal">0.00</bdi></span>
+                        <span>الضريبة <bdi id="po-tax">0.00</bdi></span>
+                        <strong>الإجمالي المعروض <bdi id="po-total">0.00</bdi></strong>
+                        <small>الإجمالي النهائي يحتسبه الخادم عند الحفظ.</small>
+                    </div>
+                </div>
+            </section>
+            <button class="btn btn-primary po-submit" type="submit"><i class="fa-solid fa-floppy-disk"></i><span>حفظ المسودة والمتابعة</span></button>
         </form>`
     );
 
     enhance();
     (order?.lines || [{}]).forEach(addLine);
-    $('#order-form').on('submit', async function (event) {
+    refreshOrderTotals();
+    $('#order-form').on('input change', 'input, textarea, select', function () {
+        const row = $(this).closest('tr');
+        const fieldName = this.name;
+        clearOrderFieldError(row.length ? `lines.${row.index()}.${fieldName}` : fieldName);
+        if (row.length) {
+            updateLineDisplay(row);
+        } else if (fieldName === 'tax_percent') {
+            refreshOrderTotals();
+        }
+    }).on('submit', async function (event) {
         event.preventDefault();
+        clearOrderErrors();
+        reindexOrderLineErrors();
         const data = formData(this);
         ['vehicle_id', 'warehouse_id', 'maintenance_card_id', 'quote_number'].forEach(key => data[key] = data[key] || null);
         data.lines = $('#lines tr').map(function () {
             return {
-                item_id: $(this).find('[name=item]').val(),
+                item_id: $(this).find('[name=item_id]').val(),
                 quantity: $(this).find('[name=quantity]').val(),
-                unit_price: $(this).find('[name=price]').val(),
+                unit_price: $(this).find('[name=unit_price]').val(),
             };
         }).get();
 
-        const submitButton = $(this).find('[type=submit]').prop('disabled', true);
+        const submitButton = $(this).find('[type=submit]').prop('disabled', true).addClass('is-loading');
+        submitButton.find('span').text('جارٍ الحفظ...');
         try {
             const saved = await api(order ? 'orders/' + order.id : 'orders', order ? 'PUT' : 'POST', data);
             location.hash = 'order/' + saved.id;
             toastr.success('تم حفظ المسودة بنجاح. يمكنك الآن إرفاق المستندات ثم إرسالها للمراجعة.');
+        } catch (xhr) {
+            if (xhr.responseJSON?.errors) {
+                applyOrderErrors(xhr.responseJSON.errors);
+            }
         } finally {
-            submitButton.prop('disabled', false);
+            submitButton.prop('disabled', false).removeClass('is-loading');
+            submitButton.find('span').text('حفظ المسودة والمتابعة');
         }
     });
 }
@@ -447,8 +873,8 @@ async function detail(id) {
 
     $('#content').html(
         head(order.number, `${lookup.categories[order.category]} · ${order.branch_name} · ${order.date}`, actions) +
-        `<div class="panel workflow-steps">${Object.entries(statuses).filter(([key]) => key !== 'rejected').map(([key, label]) => `<span class="${order.status === key ? 'current' : ''}">${label}</span>`).join('')}</div>
-        <div class="stats">${[
+        workflowSteps(order.status) +
+        `<div class="stats">${[
             [order.supplier_name, 'المورد'],
             [order.vehicle_plate || '—', 'السيارة'],
             [money(order.total_minor), 'إجمالي الطلب'],
@@ -477,11 +903,16 @@ async function detail(id) {
             <div class="document-grid">${order.media.map(media => `<div class="document-card">${media.mime.startsWith('image/') ? `<img class="photo-preview" src="${esc(media.url)}" alt="${esc(media.label)}">` : '<i class="fa-solid fa-file-pdf text-danger fs-2"></i>'}<p class="small my-2">${esc(lookup.photo_labels[media.label] || media.collection)}<br><a href="${esc(media.url)}" target="_blank" rel="noopener">${bdi(media.name)}</a></p>${order.status === 'draft' && can('orders.update') ? `<button class="btn btn-light" data-action="delete-media" data-id="${media.id}">حذف المرفق</button>` : ''}</div>`).join('') || '<p class="subtext">لا توجد مرفقات حتى الآن.</p>'}</div>
             ${order.vehicle_id ? `<p class="subtext mt-3">صور ما قبل الإصلاح المطلوبة: ${Object.values(lookup.photo_labels).join('، ')}.</p>` : ''}
         </section>
-        <section class="panel">
-            <h2 class="section-title">سجل الدورة والاعتمادات</h2>
-            ${order.approvals.length ? order.approvals.map(entry => `<p><i class="fa-solid fa-circle-check text-primary"></i> ${esc(statusLabel(entry.from_status))} ← ${esc(statusLabel(entry.to_status))} · ${bdi(entry.user?.name)} <small>${esc(entry.created_at)}</small>${entry.reason ? `<br>${esc(entry.reason)}` : ''}</p>`).join('') : '<p class="subtext">لم يُرسل الطلب إلى الاعتماد بعد.</p>'}
-        </section>`
+        ${orderTimeline(order)}`
     );
+
+    $('#content').off('click.orderTimeline', '.order-timeline-toggle').on('click.orderTimeline', '.order-timeline-toggle', function () {
+        const button = $(this);
+        const expanded = button.attr('aria-expanded') === 'true';
+        button.attr('aria-expanded', String(!expanded));
+        button.closest('.order-timeline').toggleClass('is-expanded', !expanded);
+        button.find('span').text(expanded ? `عرض ${button.closest('.order-timeline').find('.is-extra').length} أحداث سابقة` : 'إخفاء الأحداث السابقة');
+    });
 }
 
 function masterFields(kind, record = {}) {
@@ -510,18 +941,54 @@ function masterEditor(kind, record = {}) {
     openModal((record.id ? 'تعديل ' : 'إضافة ') + kinds[kind], masterFields(kind, record), data => api('masters/' + kind + (record.id ? '/' + record.id : ''), record.id ? 'PUT' : 'POST', data));
 }
 
-function masters(kind) {
+function masterColumns(kind) {
+    const base = [col('id', 'الرقم', { className: 'master-code', render: value => bdi(value) })];
+    const columns = {
+        vehicles: [
+            ...base,
+            col('plate', 'لوحة السيارة', { className: 'master-code', render: value => bdi(value) }),
+            col('model', 'الموديل'),
+            col('branch.name', 'الفرع', { orderable: false }),
+            col('year', 'السنة', { className: 'master-number', render: value => bdi(value) }),
+            col('odometer', 'قراءة العداد', { className: 'master-number', render: value => bdi(Number(value || 0).toLocaleString('ar-SA')) }),
+        ],
+        suppliers: [
+            ...base,
+            col('name', 'المورد'),
+            col('code', 'الكود', { className: 'master-code', render: value => bdi(value) }),
+            col('phone', 'الهاتف', { className: 'master-code', render: value => value ? bdi(value) : '—' }),
+        ],
+        items: [
+            ...base,
+            col('name', 'الصنف'),
+            col('sku', 'الكود', { className: 'master-code', render: value => bdi(value) }),
+            col('unit', 'الوحدة'),
+        ],
+        regions: [...base, col('name', 'المنطقة')],
+        branches: [...base, col('name', 'الفرع'), col('code', 'الكود', { className: 'master-code', render: value => bdi(value) })],
+        'cost-centers': [...base, col('name', 'مركز التكلفة'), col('code', 'الكود', { className: 'master-code', render: value => bdi(value) })],
+        warehouses: [...base, col('name', 'المخزن'), col('code', 'الكود', { className: 'master-code', render: value => bdi(value) }), col('branch.name', 'الفرع', { orderable: false })],
+    }[kind] || [...base, col('name', 'الاسم')];
+
+    columns.push({ data: 'active', title: 'الحالة', className: 'master-state-cell', render: value => activeBadge(value) });
+    if (can(permission(kind))) columns.push({ data: null, title: 'تعديل', orderable: false, searchable: false, className: 'master-actions', render: () => '<button class="btn btn-light row-edit compact-action" aria-label="تعديل"><i class="fa-solid fa-pen"></i><span>تعديل</span></button>' });
+
+    return columns;
+}
+
+function masters(kind, focusId = null) {
     if (!kinds[kind]) return;
-    $('#content').html(head(kinds[kind], 'إدارة البيانات المرجعية المستخدمة في الشاشات والعمليات اليومية.', (can(permission(kind)) ? button('إضافة سجل', 'master-add', 'plus', `data-kind="${kind}"`) : '') + (['items', 'vehicles', 'suppliers'].includes(kind) ? excelButtons(kind) : '')) + '<div class="panel" id="grid-area"></div>');
+    const focused = /^\d+$/.test(String(focusId || ''));
+    const title = focused ? `تفاصيل ${kinds[kind]}` : kinds[kind];
+    const description = focused ? 'نتيجة محددة من البحث السريع. يمكنك مراجعة بياناتها أو العودة للقائمة الكاملة.' : 'إدارة البيانات المرجعية المستخدمة في الشاشات والعمليات اليومية.';
+    const actions = (focused ? `<a href="#master/${esc(kind)}" class="btn btn-light"><i class="fa-solid fa-list"></i>عرض كل السجلات</a>` : '') + (can(permission(kind)) ? button('إضافة سجل', 'master-add', 'plus', `data-kind="${kind}"`) : '') + (!focused && ['items', 'vehicles', 'suppliers'].includes(kind) ? excelButtons(kind) : '');
+    $('#content').html(head(title, description, actions) + `<div class="panel master-result-panel${focused ? ' is-focused' : ''}" id="grid-area"></div>`);
 
-    const columns = kind === 'vehicles'
-        ? [col('id', 'الرقم'), col('plate', 'لوحة السيارة', { render: value => bdi(value) }), col('model', 'الموديل'), col('year', 'السنة'), col('odometer', 'العداد')]
-        : [col('id', 'الرقم'), col('name', 'الاسم'), ...(['items'].includes(kind) ? [col('sku', 'الكود'), col('unit', 'الوحدة')] : kind === 'regions' ? [] : [col('code', 'الكود')])];
-
-    columns.push({ data: 'active', title: 'الحالة', render: value => value ? 'نشط' : 'غير نشط' });
-    if (can(permission(kind))) columns.push({ data: null, title: 'تعديل', orderable: false, searchable: false, render: () => '<button class="btn btn-light row-edit"><i class="fa-solid fa-pen"></i>تعديل</button>' });
-
-    grid('masters/' + kind, columns);
+    grid('masters/' + kind + (focused ? '?id=' + encodeURIComponent(focusId) : ''), masterColumns(kind));
+    $('#records')
+        .addClass('master-table' + (kind === 'vehicles' ? ' vehicle-master-table' : ''))
+        .closest('.table-responsive')
+        .addClass('master-table-wrap');
     $('#records').on('click', '.row-edit', function () {
         masterEditor(kind, table.row($(this).closest('tr')).data());
     });
@@ -536,20 +1003,26 @@ function inventoryTable(showMovements) {
 
     grid('inventory/' + (showMovements ? 'movements' : 'balances') + '?warehouse_id=' + (warehouseId || ''), showMovements
         ? [
-            col('number', 'رقم الحركة', { render: value => bdi(value) }),
-            col('date', 'التاريخ'),
-            col('type', 'النوع', { render: value => esc(movementLabel(value)) }),
+            col('number', 'رقم الحركة', { className: 'inventory-code', render: value => bdi(value) }),
+            col('date', 'التاريخ', { className: 'inventory-date', render: value => bdi(value) }),
+            col('type', 'نوع الحركة', { className: 'inventory-state-cell', render: value => movementBadge(value) }),
             col('warehouse.name', 'المخزن'),
-            col('vehicle.plate', 'السيارة', { render: value => value ? bdi(value) : '—' }),
-            { data: 'lines', title: 'البنود', orderable: false, searchable: false, render: lines => lines.map(line => `${esc(line.item?.name)} × ${(line.quantity_milli || 0) / 1000}`).join('<br>') || '—' },
-            col('notes', 'الملاحظات'),
+            col('vehicle.plate', 'السيارة', { className: 'inventory-code', render: value => value ? bdi(value) : '—' }),
+            { data: 'lines', title: 'البنود', orderable: false, searchable: false, className: 'inventory-lines', render: lines => (lines || []).map(line => `<span>${esc(line.item?.sku || '')} ${esc(line.item?.name || 'صنف')}</span><bdi>${quantityText(line.quantity_milli)}</bdi>`).join('<br>') || '—' },
+            col('notes', 'الملاحظات', { className: 'inventory-notes' }),
         ]
         : [
-            col('sku', 'كود الصنف'),
+            col('sku', 'كود الصنف', { className: 'inventory-code', render: value => bdi(value) }),
             col('name', 'الصنف'),
-            { data: 'quantity_milli', title: 'الرصيد الحالي', render: value => value / 1000 },
-            { data: 'minimum_milli', title: 'حد إعادة الطلب', render: value => value / 1000 },
-        ]);
+            { data: 'quantity_milli', title: 'الرصيد الحالي', className: 'inventory-number', render: value => bdi(quantityText(value)) },
+            { data: 'minimum_milli', title: 'حد إعادة الطلب', className: 'inventory-number', render: value => bdi(quantityText(value)) },
+            { data: null, title: 'حالة الرصيد', orderable: false, searchable: false, className: 'inventory-state-cell', render: row => stockStateBadge(row.quantity_milli, row.minimum_milli) },
+        ], { order: [[1, 'asc']] });
+
+    $('#records')
+        .addClass(showMovements ? 'inventory-table inventory-movements-table' : 'inventory-table inventory-balances-table')
+        .closest('.table-responsive')
+        .addClass('inventory-table-wrap');
 }
 
 function movement(type) {
@@ -567,28 +1040,81 @@ function inventory() {
     inventoryTable(false);
 }
 
+function cardFilterQuery(includeStatus = true) {
+    const values = {
+        vehicle_id: $('#card-vehicle-filter').val(),
+        date_from: $('#card-date-from').val(),
+        date_to: $('#card-date-to').val(),
+        status: includeStatus ? $('#card-stage-filter').val() : '',
+    };
+    return $.param(Object.fromEntries(Object.entries(values).filter(([, value]) => value)));
+}
+
+async function refreshCardSummary() {
+    const data = await api('cards/summary?' + cardFilterQuery(false));
+    Object.entries(cardStatuses).forEach(([status, label]) => {
+        const count = data.counts?.[status] || 0;
+        $(`#stage-summary-${status}`).html(`<span>${esc(label)}</span><strong>${count.toLocaleString('ar-SA')}</strong><small>كارت صيانة</small>`);
+    });
+}
+
+function cardDetails(row) {
+    const order = row.order ? `<a class="btn btn-light" href="#order/${row.order.id}"><i class="fa-solid fa-file-invoice"></i>فتح الطلب المرتبط ${bdi(row.order.number)}</a>` : '<span class="subtext">لا يوجد طلب شراء مرتبط بهذا الكارت.</span>';
+    openModal(`تفاصيل ${row.number}`, `<div class="card-detail-grid"><div><span>السيارة</span><bdi>${esc(row.vehicle?.plate || '—')}</bdi></div><div><span>التاريخ</span><bdi>${esc(row.date)}</bdi></div><div><span>نوع الصيانة</span><bdi>${esc(row.type)}</bdi></div><div><span>قراءة العداد</span><bdi>${Number(row.odometer || 0).toLocaleString('ar-SA')}</bdi></div><div><span>المرحلة الحالية</span>${cardStatusBadge(row.status)}</div></div><section class="card-detail-notes"><strong>ملاحظات الكارت</strong><p>${esc(row.notes || 'لا توجد ملاحظات مسجلة.')}</p></section><div class="detail-actions">${order}</div>`, () => Promise.resolve());
+    $('#editor-form button[type=submit]').hide();
+}
+
+function cardEditor(row) {
+    openModal(`تعديل ${row.number}`, `<div class="form-grid">${field('date', 'التاريخ', row.date, 'date')}${field('type', 'نوع الصيانة', row.type)}${textareaField('notes', 'ملاحظات', row.notes || '', false, 4)}</div>`, data => api('cards/' + row.id, 'PUT', data).then(() => {
+        table.ajax.reload();
+        refreshCardSummary();
+    }));
+}
+
 function cards() {
-    $('#content').html(head('كروت الصيانة', 'إدارة استقبال السيارة ومراحل الصيانة والطلبات المرتبطة بها.', can('cards.manage') ? button('كارت صيانة جديد', 'card-add') : '') + '<div class="panel" id="grid-area"></div>');
-    grid('cards', [
-        col('number', 'رقم الكارت', { render: value => bdi(value) }),
-        col('vehicle.plate', 'السيارة', { render: value => value ? bdi(value) : '—' }),
-        col('date', 'التاريخ'),
+    const stageFilters = `<option value="">كل المراحل</option>${Object.entries(cardStatuses).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}`;
+    const stageSummary = Object.entries(cardStatuses).map(([status]) => `<button type="button" class="stage-summary-card" id="stage-summary-${status}" data-stage="${status}" aria-label="عرض كروت مرحلة ${cardStatuses[status]}"></button>`).join('');
+    $('#content').html(head('كروت الصيانة', 'تابع الكروت حسب المرحلة، ثم افتح التفاصيل أو عدّل السجل عند الحاجة.', can('cards.manage') ? button('كارت صيانة جديد', 'card-add') : '') + `<section class="panel card-filter-panel"><div class="card-filter-head"><div><h2 class="section-title">تصفية الكروت</h2><p class="subtext">حدّد التاريخ أو السيارة أو المرحلة لتحديث النتائج.</p></div><button type="button" id="clear-card-filters" class="btn btn-light"><i class="fa-solid fa-rotate-left"></i>مسح الفلاتر</button></div><div class="form-grid card-filters"><div class="field"><label for="card-date-from">من تاريخ</label><input id="card-date-from" class="form-control" type="date"></div><div class="field"><label for="card-date-to">إلى تاريخ</label><input id="card-date-to" class="form-control" type="date"></div><div class="field"><label for="card-vehicle-filter">السيارة</label><select id="card-vehicle-filter" class="form-select searchable"><option value="">كل السيارات</option>${lookup.vehicles.map(vehicle => `<option value="${vehicle.id}">${esc(vehicle.plate)}</option>`).join('')}</select></div><div class="field"><label for="card-stage-filter">المرحلة</label><select id="card-stage-filter" class="form-select">${stageFilters}</select></div></div></section><section class="stage-summary-grid" aria-label="ملخص الكروت حسب المرحلة">${stageSummary}</section><div class="panel" id="grid-area"></div>`);
+    enhance();
+    const loadGrid = () => {
+        grid('cards' + (cardFilterQuery() ? '?' + cardFilterQuery() : ''), [
+        col('number', 'رقم الكارت', { className: 'card-code', render: value => bdi(value) }),
+        col('vehicle.plate', 'لوحة السيارة', { className: 'card-code', render: value => value ? bdi(value) : '—' }),
+        col('date', 'التاريخ', { className: 'card-date', render: value => bdi(value) }),
         col('type', 'نوع الصيانة'),
-        { data: 'status', title: 'الحالة', render: value => esc(cardStatusLabel(value)) },
+        { data: 'odometer', title: 'قراءة العداد', className: 'card-number', render: value => bdi(Number(value || 0).toLocaleString('ar-SA')) },
+        { data: 'status', title: 'المرحلة الحالية', className: 'card-state-cell', render: value => cardStatusBadge(value) },
         {
             data: null,
             title: 'الإجراءات',
             orderable: false,
             searchable: false,
-            render: row => `${can('cards.manage') && row.status !== 'closed' ? '<button class="btn btn-light card-next">المرحلة التالية</button>' : ''}${row.order ? `<a class="btn btn-light" href="#order/${row.order.id}">الطلب المرتبط</a>` : can('orders.create') ? '<button class="btn btn-light card-order">إنشاء طلب مرتبط</button>' : ''}`,
+            className: 'card-actions',
+            render: row => `<button class="btn btn-light card-details compact-action" aria-label="تفاصيل الكارت"><i class="fa-solid fa-eye"></i><span>تفاصيل</span></button>${can('cards.manage') ? '<button class="btn btn-light card-edit compact-action" aria-label="تعديل الكارت"><i class="fa-solid fa-pen"></i><span>تعديل</span></button>' : ''}${can('cards.manage') && row.status !== 'closed' ? '<button class="btn btn-light card-next compact-action" aria-label="المرحلة التالية"><i class="fa-solid fa-arrow-left"></i><span>المرحلة التالية</span></button>' : ''}${row.order ? `<a class="btn btn-light compact-action" aria-label="الطلب المرتبط" href="#order/${row.order.id}"><i class="fa-solid fa-file-invoice"></i><span>الطلب المرتبط</span></a>` : can('orders.create') ? '<button class="btn btn-light card-order compact-action" aria-label="إنشاء طلب مرتبط"><i class="fa-solid fa-plus"></i><span>إنشاء طلب مرتبط</span></button>' : ''}${can('cards.manage') ? '<button class="btn btn-light text-danger card-delete compact-action" aria-label="حذف الكارت"><i class="fa-solid fa-trash"></i><span>حذف</span></button>' : ''}`,
         },
-    ]);
+        ]);
+        $('#records').addClass('maintenance-card-table').closest('.table-responsive').addClass('maintenance-card-table-wrap');
+    };
+    loadGrid();
 
-    $('#records').on('click', '.card-next', async function () {
+    $('#grid-area').on('click', '.card-details', function () {
+        cardDetails(table.row($(this).closest('tr')).data());
+    }).on('click', '.card-edit', function () {
+        cardEditor(table.row($(this).closest('tr')).data());
+    }).on('click', '.card-delete', async function () {
+        const row = table.row($(this).closest('tr')).data();
+        const result = await Swal.fire({ title: 'حذف كارت الصيانة؟', text: `سيتم حذف ${row.number} نهائيًا.`, icon: 'warning', showCancelButton: true, confirmButtonText: 'حذف', cancelButtonText: 'إلغاء', reverseButtons: true });
+        if (result.isConfirmed) {
+            await api('cards/' + row.id, 'DELETE');
+            table.ajax.reload();
+            refreshCardSummary();
+        }
+    }).on('click', '.card-next', async function () {
         const row = table.row($(this).closest('tr')).data();
         const stages = Object.keys(cardStatuses);
         await api('cards/' + row.id, 'PATCH', { status: stages[stages.indexOf(row.status) + 1], notes: row.notes });
         table.ajax.reload();
+        refreshCardSummary();
     }).on('click', '.card-order', function () {
         const row = table.row($(this).closest('tr')).data();
         orderForm();
@@ -596,18 +1122,31 @@ function cards() {
         $('#order-form [name=vehicle_id]').val(row.vehicle_id).trigger('change');
         $('#order-form [name=branch_id]').val(row.branch_id).trigger('change');
     });
+    $('#card-date-from, #card-date-to, #card-vehicle-filter, #card-stage-filter').on('change', () => {
+        loadGrid();
+        refreshCardSummary();
+    });
+    $('.stage-summary-card').on('click', function () {
+        $('#card-stage-filter').val(this.dataset.stage).trigger('change');
+    });
+    $('#clear-card-filters').on('click', () => {
+        $('#card-date-from, #card-date-to, #card-stage-filter').val('');
+        $('#card-vehicle-filter').val('').trigger('change');
+    });
+    refreshCardSummary();
 }
 
 function users() {
     $('#content').html(head('المستخدمون', 'إدارة الحسابات والأدوار ونطاق الوصول إلى الفروع.', button('مستخدم جديد', 'user-add')) + '<div class="panel" id="grid-area"></div>');
     grid('admin/users', [
         col('name', 'الاسم'),
-        col('email', 'البريد الإلكتروني', { render: value => `<span dir="ltr">${esc(value)}</span>` }),
+        col('email', 'البريد الإلكتروني', { className: 'admin-code', render: value => `<bdi>${esc(value)}</bdi>` }),
         { data: 'roles', title: 'الأدوار', orderable: false, searchable: false, render: roles => renderRolePills(roles) || '—' },
-        { data: 'active', title: 'الحالة', render: value => value ? 'نشط' : 'معطل' },
-        { data: 'all_branches', title: 'نطاق الفروع', render: value => value ? 'جميع الفروع' : 'فروع محددة' },
-        { data: null, title: 'تعديل', orderable: false, searchable: false, render: () => '<button class="btn btn-light edit-user">تعديل</button>' },
+        { data: 'active', title: 'الحالة', className: 'admin-state-cell', render: value => userStatusBadge(value) },
+        { data: 'all_branches', title: 'نطاق الفروع', className: 'admin-state-cell', render: value => branchScopeBadge(value) },
+        { data: null, title: 'تعديل', orderable: false, searchable: false, className: 'admin-actions', render: () => '<button class="btn btn-light edit-user compact-action" aria-label="تعديل المستخدم"><i class="fa-solid fa-pen"></i><span>تعديل</span></button>' },
     ]);
+    $('#records').addClass('admin-table users-table').closest('.table-responsive').addClass('admin-table-wrap');
 
     $('#records').on('click', '.edit-user', function () {
         userEditor(table.row($(this).closest('tr')).data());
@@ -696,7 +1235,7 @@ async function roles() {
                     <h3>${esc(roleLabel(role.name))}</h3>
                     <p>${ui.role_labels?.[role.name] ? 'دور افتراضي في النظام' : 'دور مخصص'}</p>
                 </div>
-                <span class="badge">${role.permissions.length} صلاحية</span>
+                <span class="admin-pill role-pill">${role.permissions.length} صلاحية</span>
             </div>
             <p class="list-note">${labels.length ? labels.join('، ') : 'لا توجد صلاحيات محددة لهذا الدور.'}</p>
             <div class="action-bar mb-0 mt-3">${role.name !== 'admin' ? button('تعديل الدور', 'role-edit', 'pen', `data-id="${role.id}"`) : '<span class="subtext">دور مدير النظام محمي</span>'}</div>
@@ -728,12 +1267,13 @@ function renderActivityDetails(details) {
 function activity() {
     $('#content').html(head('سجل النشاطات', 'متابعة الأنشطة والتغييرات بصياغة عربية واضحة مع احترام صلاحيات الوصول.') + '<div class="panel" id="grid-area"></div>');
     grid('admin/activity', [
-        col('created_at', 'الوقت'),
+        col('created_at', 'الوقت', { className: 'admin-code', render: value => bdi(value) }),
         { data: 'causer.name', title: 'المستخدم', render: value => value ? bdi(value) : 'النظام' },
-        col('event_label', 'النشاط'),
+        col('event_label', 'النشاط', { className: 'admin-state-cell', render: value => activityBadge(value) }),
         { data: null, title: 'السجل المرتبط', render: row => `<div><strong>${esc(row.subject_label || 'سجل')}</strong><div class="subtext">${bdi(row.subject_reference || '—')}</div></div>` },
         { data: 'details', title: 'التفاصيل', orderable: false, searchable: false, render: details => renderActivityDetails(details || {}) },
     ], { order: [[0, 'desc']], pageLength: 8 });
+    $('#records').addClass('admin-table activity-table').closest('.table-responsive').addClass('admin-table-wrap');
 }
 
 function uploadFile(orderId, collection, file, label = '') {
@@ -788,20 +1328,43 @@ function documentForm(kind) {
 
 $('#editor-form').on('submit', async function (event) {
     event.preventDefault();
-    const buttonNode = $(this).find('[type=submit]').prop('disabled', true);
+    clearModalErrors(this);
+    const buttonNode = $(this).find('[type=submit]').prop('disabled', true).addClass('is-loading').attr('aria-busy', 'true');
     try {
         await modalSave(formData(this), this);
         bootstrap.Modal.getInstance('#editor').hide();
         toastr.success('تم حفظ البيانات بنجاح.');
         await refreshLookups();
         await route();
+    } catch (error) {
+        if (error?.status === 422) {
+            applyModalErrors(this, error.responseJSON?.errors || {});
+        }
     } finally {
-        buttonNode.prop('disabled', false);
+        buttonNode.prop('disabled', false).removeClass('is-loading').removeAttr('aria-busy');
     }
 });
 
-$(document).on('click', '.remove-line', function () {
-    $(this).closest('tr').remove();
+$(document).on('click', '.remove-line', async function () {
+    const row = $(this).closest('tr');
+    if ($('#lines tr').length <= 1) {
+        applyOrderErrors({ lines: ['يجب إضافة بند واحد على الأقل.'] });
+        return;
+    }
+    const result = await Swal.fire({
+        title: 'حذف البند؟',
+        text: 'سيتم حذف هذا البند من المسودة عند الحفظ.',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'حذف',
+        cancelButtonText: 'إلغاء',
+        reverseButtons: true,
+    });
+    if (result.isConfirmed) {
+        row.remove();
+        reindexOrderLineErrors();
+        refreshOrderTotals();
+    }
 }).on('click', '[data-quick]', async function () {
     const kind = this.dataset.quick;
     const target = this.dataset.target;
@@ -835,6 +1398,7 @@ $(document).on('click', '.remove-line', function () {
     switch (action) {
         case 'line-add':
             addLine();
+            clearOrderFieldError('lines');
             break;
         case 'edit-order':
             orderForm(currentOrder);
@@ -848,19 +1412,20 @@ $(document).on('click', '.remove-line', function () {
             break;
         case 'transition': {
             const next = this.dataset.next;
+            const needsReason = ['return', 'reject'].includes(next);
             const result = await Swal.fire({
                 title: 'تأكيد الإجراء',
                 text: next === 'match' ? 'سيجري النظام مطابقة المستندات والكميات والقيمة على الخادم.' : 'هل تريد تنفيذ هذا الإجراء الآن؟',
-                input: ['return', 'reject'].includes(next) ? 'textarea' : undefined,
-                inputLabel: ['return', 'reject'].includes(next) ? 'سبب الإجراء' : undefined,
+                input: needsReason ? 'textarea' : undefined,
+                inputLabel: needsReason ? 'سبب الإجراء' : undefined,
                 showCancelButton: true,
                 confirmButtonText: 'تأكيد',
                 cancelButtonText: 'إلغاء',
                 reverseButtons: true,
-                inputValidator: ['return', 'reject'].includes(next) ? value => !value?.trim() ? 'سبب الإجراء مطلوب.' : undefined : undefined,
+                inputValidator: needsReason ? value => !value?.trim() ? 'سبب الإجراء مطلوب.' : undefined : undefined,
             });
             if (result.isConfirmed) {
-                await api(`orders/${currentOrder.id}/actions/${next}`, 'POST', { reason: result.value || null });
+                await api(`orders/${currentOrder.id}/actions/${next}`, 'POST', needsReason ? { reason: result.value.trim() } : {});
                 await route();
             }
             break;
@@ -914,6 +1479,7 @@ window.addEventListener('hashchange', route);
         me = await api('me');
         await refreshLookups();
         nav();
+        initGlobalSearch();
         await route();
     } catch (error) {
         $('#content').html('<div class="panel">تعذر الاتصال بالخادم في الوقت الحالي.</div>');

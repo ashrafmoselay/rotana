@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\InventoryController;
 use App\Http\Controllers\Api\MasterController;
 use App\Http\Controllers\Api\MediaController;
 use App\Http\Controllers\Api\OrderController;
+use App\Http\Controllers\Api\SearchController;
 use App\Http\Controllers\AuthController;
 use Illuminate\Support\Facades\Route;
 
@@ -24,6 +25,7 @@ Route::middleware(['auth', 'active'])->group(function () {
         Route::get('me', fn () => ['user' => auth()->user()->only('id', 'name', 'email', 'all_branches'), 'permissions' => auth()->user()->getAllPermissions()->pluck('name')]);
         Route::get('lookups', [MasterController::class, 'lookups']);
         Route::get('dashboard', DashboardController::class);
+        Route::get('search', SearchController::class)->middleware('throttle:30,1');
         Route::get('orders', [OrderController::class, 'index']);
         Route::post('orders', [OrderController::class, 'store']);
         Route::get('orders/{order}', [OrderController::class, 'show']);
@@ -38,7 +40,10 @@ Route::middleware(['auth', 'active'])->group(function () {
         Route::post('inventory/movements', [InventoryController::class, 'store']);
         Route::get('cards', [CardController::class, 'index']);
         Route::post('cards', [CardController::class, 'store']);
+        Route::get('cards/summary', [CardController::class, 'summary']);
+        Route::put('cards/{card}', [CardController::class, 'edit']);
         Route::patch('cards/{card}', [CardController::class, 'update']);
+        Route::delete('cards/{card}', [CardController::class, 'destroy']);
         Route::get('masters/{kind}', [MasterController::class, 'index']);
         Route::post('masters/{kind}', [MasterController::class, 'store']);
         Route::put('masters/{kind}/{id}', [MasterController::class, 'update']);

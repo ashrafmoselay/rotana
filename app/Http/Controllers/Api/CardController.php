@@ -14,11 +14,42 @@ use Yajra\DataTables\Facades\DataTables;
 
 class CardController extends Controller
 {
-    public function index()
+    public function index(Request $r)
     {
         Access::allow('cards.view');
+        $this->clampDataTableLength($r);
 
-        return DataTables::eloquent(Access::scope(MaintenanceCard::with('vehicle', 'order:id,number,maintenance_card_id')))->escapeColumns([])->toJson();
+        $q = Access::scope(MaintenanceCard::with('vehicle:id,plate,branch_id,odometer,active', 'order:id,number,maintenance_card_id'));
+        if ($r->filled('branch_id')) {
+            Access::branch($r->integer('branch_id'));
+            $q->where('branch_id', $r->integer('branch_id'));
+        }
+        $this->applyFilters($q, $r);
+
+        return DataTables::eloquent($q)
+            ->filterColumn('vehicle.plate', fn ($q, $keyword) => $q->whereHas('vehicle', fn ($q) => $q->where('plate', 'like', '%'.$keyword.'%')))
+            ->orderColumn('vehicle.plate', function ($q, $order) {
+                $q->orderBy(
+                    Vehicle::select('plate')
+                        ->whereColumn('vehicles.id', 'maintenance_cards.vehicle_id')
+                        ->limit(1),
+                    $order
+                );
+            })
+            ->escapeColumns([])
+            ->toJson();
+    }
+
+    public function summary(Request $r)
+    {
+        Access::allow('cards.view');
+        $q = Access::scope(MaintenanceCard::query());
+        $this->applyFilters($q, $r, false);
+
+        $counts = (clone $q)->selectRaw('status, count(*) as total')->groupBy('status')->pluck('total', 'status');
+
+        return response()->json(['counts' => collect(['pending', 'waiting_parts', 'in_progress', 'completed', 'closed'])
+            ->mapWithKeys(fn ($status) => [$status => (int) ($counts[$status] ?? 0)])]);
     }
 
     public function store(Request $r)
@@ -54,5 +85,56 @@ class CardController extends Controller
 
             return $card;
         });
+    }
+
+    public function edit(Request $r, MaintenanceCard $card)
+    {
+        Access::allow('cards.manage');
+        $d = $r->validate([
+            'date' => 'required|date_format:Y-m-d',
+            'type' => 'required|string|max:190',
+            'notes' => 'nullable|string|max:2000',
+        ]);
+
+        Access::branch($card->branch_id);
+        $card->update($d);
+        Audit::record('cards.updated', $card, ['branch_id' => $card->branch_id]);
+
+        return $card->fresh('vehicle:id,plate');
+    }
+
+    public function destroy(MaintenanceCard $card)
+    {
+        Access::allow('cards.manage');
+        Access::branch($card->branch_id);
+        abort_if($card->order()->exists(), 422, 'لا يمكن حذف كارت مرتبط بطلب شراء.');
+
+        Audit::record('cards.deleted', $card, ['branch_id' => $card->branch_id]);
+        $card->delete();
+
+        return response()->noContent();
+    }
+
+    private function applyFilters($q, Request $r, bool $includeStatus = true): void
+    {
+        if ($r->filled('status') && $includeStatus) {
+            $q->where('status', $r->input('status'));
+        }
+        if ($r->filled('vehicle_id')) {
+            $q->where('vehicle_id', $r->integer('vehicle_id'));
+        }
+        if ($r->filled('date_from')) {
+            $q->whereDate('date', '>=', $r->input('date_from'));
+        }
+        if ($r->filled('date_to')) {
+            $q->whereDate('date', '<=', $r->input('date_to'));
+        }
+    }
+
+    private function clampDataTableLength(Request $r): void
+    {
+        if ($r->has('length')) {
+            $r->merge(['length' => min(max((int) $r->input('length'), 1), 100)]);
+        }
     }
 }

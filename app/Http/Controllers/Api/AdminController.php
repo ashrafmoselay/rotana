@@ -16,11 +16,18 @@ use Yajra\DataTables\Facades\DataTables;
 
 class AdminController extends Controller
 {
-    public function users()
+    public function users(Request $r)
     {
         Access::allow('users.manage');
+        $this->clampDataTableLength($r);
 
-        return DataTables::eloquent(User::query()->select('id', 'name', 'email', 'active', 'all_branches')->with('roles:id,name', 'branches:id,name'))->escapeColumns([])->toJson();
+        $q = User::query()->select('id', 'name', 'email', 'active', 'all_branches')->with('roles:id,name', 'branches:id,name');
+        if (! auth()->user()->all_branches) {
+            $q->where('all_branches', false)
+                ->whereHas('branches', fn ($q) => $q->whereIn('branches.id', auth()->user()->branches()->select('branches.id')));
+        }
+
+        return DataTables::eloquent($q)->escapeColumns([])->toJson();
     }
 
     public function userSave(Request $r, ?User $user = null)
@@ -83,9 +90,10 @@ class AdminController extends Controller
         });
     }
 
-    public function activity()
+    public function activity(Request $r)
     {
         Access::allow('activity.view');
+        $this->clampDataTableLength($r);
         $q = Activity::with('causer:id,name', 'subject')->latest('id');
         if (! auth()->user()->all_branches) {
             $q->whereIn('properties->branch_id', auth()->user()->branches()->pluck('branches.id'));
@@ -96,7 +104,16 @@ class AdminController extends Controller
             ->addColumn('subject_label', fn (Activity $activity) => UiText::subjectLabel($activity->subject_type))
             ->addColumn('subject_reference', fn (Activity $activity) => UiText::subjectReference($activity))
             ->addColumn('details', fn (Activity $activity) => UiText::activityDetails($activity))
+            ->removeColumn('properties')
+            ->removeColumn('subject')
             ->escapeColumns([])
             ->toJson();
+    }
+
+    private function clampDataTableLength(Request $r): void
+    {
+        if ($r->has('length')) {
+            $r->merge(['length' => min(max((int) $r->input('length'), 1), 100)]);
+        }
     }
 }

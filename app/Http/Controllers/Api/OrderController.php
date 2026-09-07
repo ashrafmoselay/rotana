@@ -19,8 +19,20 @@ class OrderController extends Controller
     public function index(Request $r, OrderQueries $queries)
     {
         Access::allow('orders.view');
+        if ($r->has('length')) {
+            $r->merge(['length' => min(max((int) $r->input('length'), 1), 100)]);
+        }
 
-        return DataTables::eloquent($queries->query($r)->with('payment'))->addColumn('total', fn ($o) => Amounts::money($o->total_minor))->addColumn('paid', fn ($o) => Amounts::money($o->payment?->amount_minor ?? 0))->addColumn('status_label', fn ($o) => $o->status->label())->escapeColumns([])->toJson();
+        return DataTables::eloquent($queries->query($r)->with('payment'))
+            ->filterColumn('total', fn ($q, $keyword) => $q->where('total_minor', (int) round(((float) $keyword) * 100)))
+            ->filterColumn('status_label', fn ($q, $keyword) => $q->where('status', $keyword))
+            ->orderColumn('total', 'total_minor $1')
+            ->orderColumn('status_label', 'status $1')
+            ->addColumn('total', fn ($o) => Amounts::money($o->total_minor))
+            ->addColumn('paid', fn ($o) => Amounts::money($o->payment?->amount_minor ?? 0))
+            ->addColumn('status_label', fn ($o) => $o->status->label())
+            ->escapeColumns([])
+            ->toJson();
     }
 
     public function store(SaveOrderRequest $r)

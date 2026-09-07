@@ -8,28 +8,32 @@
     <link rel="stylesheet" href="/assets/vendor/bootstrap.rtl.min.css">
     <link rel="stylesheet" href="/assets/vendor/css/all.min.css">
     <link rel="stylesheet" href="/assets/app.css">
+    <link rel="stylesheet" href="/assets/login.css">
 </head>
 <body class="auth-page">
     <main class="auth-layout">
         <section class="auth-brand-panel" aria-label="هوية روتانا">
-            <div class="auth-brand-badge"><i class="fa-solid fa-car-side" aria-hidden="true"></i><span>روتانا</span></div>
-            <div>
-                <h1>مرحبًا بعودتك</h1>
-                <p>سجّل دخولك لإدارة الأسطول والمشتريات ومتابعة العمليات.</p>
+            <div class="auth-brand-content">
+                <div class="auth-logo-wrap"><img class="auth-logo" src="/assets/brand/rotana-logo.jpg" alt="روتانا للسيارات"></div>
+                <div class="auth-hero-copy">
+                    <span class="auth-eyebrow"><i class="fa-solid fa-sparkles" aria-hidden="true"></i> منصة تشغيل موحّدة</span>
+                    <h1>تشغيل أكثر ذكاءً، من مكان واحد.</h1>
+                    <p>أدر الأسطول والمشتريات والصيانة والمخزون بثقة ووضوح.</p>
+                </div>
             </div>
             <div class="auth-brand-points">
-                <div><strong>مشتريات مترابطة</strong><span>متابعة الطلب من المسودة حتى الإغلاق.</span></div>
-                <div><strong>تشغيل أوضح</strong><span>ربط الصيانة والمخزون والمدفوعات في شاشة واحدة.</span></div>
+                <div><i class="fa-solid fa-diagram-project" aria-hidden="true"></i><span><strong>مشتريات مترابطة</strong><small>من المسودة حتى الإغلاق</small></span></div>
+                <div><i class="fa-solid fa-chart-line" aria-hidden="true"></i><span><strong>تشغيل أوضح</strong><small>الصيانة والمخزون والمدفوعات</small></span></div>
             </div>
         </section>
         <section class="auth-form-panel">
             <form method="post" action="/login" class="auth-card" id="login-form" novalidate>
                 @csrf
                 <div class="auth-card-head">
-                    <div class="auth-icon"><i class="fa-solid fa-car-side" aria-hidden="true"></i></div>
+                    <div class="auth-icon"><img src="/assets/brand/rotana-logo.jpg" alt="" aria-hidden="true"></div>
                     <div>
-                        <h2>تسجيل الدخول</h2>
-                        <p>أدخل بيانات الحساب للمتابعة.</p>
+                        <h2>أهلًا بعودتك</h2>
+                        <p>أدخل بياناتك للوصول إلى حسابك.</p>
                     </div>
                 </div>
 
@@ -37,7 +41,7 @@
                     <div class="alert alert-danger" role="alert" aria-live="assertive">{{ $errors->first() }}</div>
                 @endif
 
-                <div class="mb-3">
+                <div class="auth-field">
                     <label class="form-label" for="email">البريد الإلكتروني</label>
                     <div class="input-icon-wrap">
                         <span class="input-icon" aria-hidden="true"><i class="fa-regular fa-envelope"></i></span>
@@ -46,7 +50,7 @@
                     @error('email')<div class="invalid-feedback d-block" id="email-error">{{ $message }}</div>@enderror
                 </div>
 
-                <div class="mb-4">
+                <div class="auth-field auth-password-field">
                     <label class="form-label" for="password">كلمة المرور</label>
                     <div class="input-icon-wrap password-wrap">
                         <span class="input-icon" aria-hidden="true"><i class="fa-solid fa-lock"></i></span>
@@ -60,9 +64,10 @@
                 </div>
 
                 <button class="btn btn-primary auth-submit" type="submit">
-                    <span class="submit-label">تسجيل الدخول</span>
+                    <span class="submit-label">تسجيل الدخول <i class="fa-solid fa-arrow-left" aria-hidden="true"></i></span>
                     <span class="submit-progress" hidden>جارٍ التحقق...</span>
                 </button>
+                <p class="auth-security-note"><i class="fa-solid fa-shield-halved" aria-hidden="true"></i> اتصالك محمي وآمن</p>
             </form>
         </section>
     </main>
