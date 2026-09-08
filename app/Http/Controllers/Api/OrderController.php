@@ -35,6 +35,27 @@ class OrderController extends Controller
             ->toJson();
     }
 
+    public function summary(Request $r, OrderQueries $queries)
+    {
+        Access::allow('orders.view');
+
+        $categoryQuery = $queries->query($r, ['category']);
+        $statusQuery = $queries->query($r, ['status']);
+        $categoryTotal = (clone $categoryQuery)->count();
+        $statusTotal = (clone $statusQuery)->count();
+        $categoryCounts = $categoryQuery->selectRaw('category, COUNT(*) as total')->groupBy('category')->pluck('total', 'category');
+        $statusCounts = $statusQuery->selectRaw('status, COUNT(*) as total')->groupBy('status')->pluck('total', 'status');
+
+        return response()->json([
+            'categories' => collect([['category' => 'all', 'label' => 'الكل', 'count' => $categoryTotal]])->concat(collect(config('rotana.categories'))->map(fn ($label, $category) => [
+                'category' => $category, 'label' => $label, 'count' => (int) ($categoryCounts[$category] ?? 0),
+            ]))->values(),
+            'statuses' => collect([['status' => 'all', 'label' => 'الكل', 'count' => $statusTotal]])->concat(collect(config('rotana.statuses', []))->map(fn ($label, $status) => [
+                'status' => $status, 'label' => $label, 'count' => (int) ($statusCounts[$status] ?? 0),
+            ]))->values(),
+        ]);
+    }
+
     public function store(SaveOrderRequest $r)
     {
         return response()->json($this->service->save($r->validated()), 201);

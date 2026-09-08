@@ -1,0 +1,53 @@
+.dashboard-charts-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(340px, .9fr);
+    gap: 18px;
+    align-items: stretch;
+    margin-bottom: 18px;
+}
+
+.dashboard-charts-grid > .dashboard-reference-panel {
+    min-width: 0;
+    margin-bottom: 0;
+}
+
+.dashboard-chart-panel #dashboard-chart,
+.dashboard-stage-panel #dashboard-stage-chart {
+    min-height: 292px;
+}
+
+.dashboard-focus-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr);
+    gap: 18px;
+    align-items: stretch;
+}
+
+.dashboard-focus-grid > .dashboard-reference-panel {
+    margin-bottom: 18px;
+}
+
+.dashboard-focus-grid .dashboard-reference-panel > h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.dashboard-focus-grid .dashboard-reference-panel > h2 i {
+    color: #079eac;
+    font-size: 15px;
+}
+
+@media (max-width: 1100px) {
+    .dashboard-charts-grid,
+    .dashboard-focus-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 640px) {
+    .dashboard-chart-panel #dashboard-chart,
+    .dashboard-stage-panel #dashboard-stage-chart {
+        min-height: 280px;
+    }
+}

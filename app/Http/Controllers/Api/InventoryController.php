@@ -50,7 +50,7 @@ class InventoryController extends Controller
         Access::allow('inventory.view');
         $this->clampDataTableLength($r);
 
-        $q = StockMovement::with('lines.item', 'warehouse', 'vehicle');
+        $q = StockMovement::with('lines.item', 'warehouse', 'destinationWarehouse', 'vehicle');
         if (! auth()->user()->all_branches) {
             $q->whereHas('warehouse', fn ($q) => Access::scope($q));
         }

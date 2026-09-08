@@ -1,7 +1,7 @@
 /* Rotana server-backed application. All mutations require Laravel session + CSRF. */
 'use strict';
 
-let lookup = {}, me = {}, currentOrder = null, table = null, chart = null, modalSave = null, availableRoles = null, searchRequest = null, searchTimer = null, searchActiveIndex = -1;
+let lookup = {}, me = {}, currentOrder = null, table = null, chart = null, stageChart = null, modalSave = null, availableRoles = null, searchRequest = null, searchTimer = null, searchActiveIndex = -1, dashboardRecentRequest = null;
 let ui = window.rotanaUi || {};
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -232,9 +232,10 @@ function grid(url, columns, options = {}) {
 const selectColumn = () => ({ data: 'id', title: '<input type="checkbox" class="select-all" aria-label="تحديد الكل">', orderable: false, searchable: false, className: 'row-selector', render: id => `<input type="checkbox" class="row-select" value="${Number(id)}" aria-label="تحديد السجل">` });
 
 function enableBulkDelete(kind, permissionName, extra = {}) {
+    const container = $('#content');
+    container.find('.bulk-delete-bar').remove();
     if (!can(permissionName)) return;
     $('#grid-area').before('<div class="action-bar bulk-delete-bar"><button type="button" class="btn btn-light text-danger bulk-delete" disabled><i class="fa-solid fa-trash"></i>حذف المحدد</button><span class="subtext bulk-selection-count">لم يتم تحديد سجلات.</span></div>');
-    const container = $('#content');
     const selected = () => $('#records .row-select:checked').map((_, node) => Number(node.value)).get();
     const update = () => {
         const count = selected().length;
@@ -497,19 +498,42 @@ function activityBadge(value) {
 }
 
 function nav() {
+    const masterIcons = {
+        vehicles: 'car-side',
+        suppliers: 'truck-field',
+        items: 'boxes-stacked',
+        regions: 'map-location-dot',
+        branches: 'code-branch',
+        'cost-centers': 'chart-pie',
+        warehouses: 'warehouse',
+    };
     const entries = [
-        ['dashboard', 'لوحة التحكم', 'gauge-high', 'dashboard.view'],
-        ['orders', 'طلبات الشراء', 'file-invoice', 'orders.view'],
-        ['inventory', 'المخزون والحركات', 'boxes-stacked', 'inventory.view'],
-        ['cards', 'كروت الصيانة', 'screwdriver-wrench', 'cards.view'],
-        ...Object.entries(kinds).map(([key, label]) => ['master/' + key, label, key === 'vehicles' ? 'car' : 'database', ['vehicles', 'items', 'suppliers'].includes(key) ? key + '.view' : 'masters.manage']),
-        ['reports', 'التقارير', 'chart-line', 'reports.view'],
-        ['users', 'المستخدمون', 'users', 'users.manage'],
-        ['roles', 'الأدوار والصلاحيات', 'user-shield', 'roles.manage'],
-        ['activity', 'سجل النشاطات', 'clock-rotate-left', 'activity.view'],
+        { key: 'dashboard', label: 'لوحة التحكم', icon: 'gauge-high', permission: 'dashboard.view' },
+        { key: 'orders', label: 'طلبات الشراء', icon: 'file-invoice-dollar', permission: 'orders.view' },
+        { key: 'inventory', label: 'المخزون والحركات', icon: 'boxes-stacked', permission: 'inventory.view' },
+        { key: 'cards', label: 'كروت الصيانة', icon: 'screwdriver-wrench', permission: 'cards.view' },
+        ...Object.entries(kinds).map(([key, label]) => ({
+            key: 'master/' + key,
+            label,
+            icon: masterIcons[key] || 'database',
+            permission: ['vehicles', 'items', 'suppliers'].includes(key) ? key + '.view' : 'masters.manage',
+            group: 'reference',
+        })),
+        { key: 'vehicle-log', label: 'سجل عمليات السيارات', icon: 'route', permission: 'reports.view', group: 'operations' },
+        { key: 'users', label: 'المستخدمون', icon: 'users-gear', permission: 'users.manage', group: 'admin' },
+        { key: 'roles', label: 'الأدوار والصلاحيات', icon: 'user-shield', permission: 'roles.manage', group: 'admin' },
+        { key: 'activity', label: 'سجل النشاطات', icon: 'clock-rotate-left', permission: 'activity.view', group: 'admin' },
     ];
 
-    $('#navigation').html(entries.filter(entry => can(entry[3])).map(entry => `<a class="nav-item" href="#${entry[0]}"><i class="fa-solid fa-${entry[2]}"></i>${entry[1]}</a>`).join(''));
+    const visible = entries.filter(entry => can(entry.permission));
+    let previousGroup = '';
+    const markup = visible.map(entry => {
+        const group = entry.group || '';
+        const divider = group && group !== previousGroup ? `<div class="nav-section-label">${group === 'reference' ? 'البيانات المرجعية' : group === 'operations' ? 'التشغيل والمتابعة' : 'الإدارة والصلاحيات'}</div>` : '';
+        previousGroup = group;
+        return `${divider}<a class="nav-item" data-nav-key="${entry.key}" href="#${entry.key}"><i class="fa-solid fa-${entry.icon}"></i><span>${entry.label}</span></a>`;
+    }).join('');
+    $('#navigation').html(markup);
 }
 
 async function refreshLookups() {
@@ -522,6 +546,10 @@ async function route() {
         chart.destroy();
         chart = null;
     }
+    if (stageChart) {
+        stageChart.destroy();
+        stageChart = null;
+    }
     if (table) {
         table.destroy();
         table = null;
@@ -531,7 +559,8 @@ async function route() {
     const routeParams = new URLSearchParams(queryString);
     const requestedCategory = routeParams.get('category');
     const category = Object.hasOwn(lookup.categories, requestedCategory) ? requestedCategory : '';
-    $('.nav-item').removeClass('active').filter(`[href="#${hash.split('/')[0]}"]`).addClass('active');
+    const routeKey = hash.startsWith('master/') ? hash : hash.split('/')[0];
+    $('.nav-item').removeClass('active').removeAttr('aria-current').filter(`[data-nav-key="${CSS.escape(routeKey)}"]`).addClass('active').attr('aria-current', 'page');
     $('#sidebar').removeClass('open');
 
     try {
@@ -548,8 +577,9 @@ async function route() {
 
         switch (hash) {
             case 'dashboard': return await dashboard();
-            case 'orders': return orders(false, category);
+            case 'orders': return orders(false, category, routeParams.get('status') || '', routeParams.get('open') === '1');
             case 'reports': return orders(true);
+            case 'vehicle-log': return vehicleLog(routeParams);
             case 'inventory': return inventory(routeParams);
             case 'cards': return cards(routeParams);
             case 'users': return users();
@@ -563,106 +593,161 @@ async function route() {
     }
 }
 
+function dashboardRecentTable(type, rows) {
+    const link = (url, label) => `<a href="${esc(url)}">${bdi(label)}</a>`;
+    if (!rows.length) return '<tr><td colspan="6" class="dashboard-empty">لا توجد بيانات حديثة ضمن نطاق صلاحياتك.</td></tr>';
+    if (type === 'orders') return rows.map(row => `<tr><td>${link(row.url, row.number)}</td><td>${esc(row.category)}</td><td>${esc(row.branch)}</td><td>${esc(row.supplier)}</td><td>${bdi(money(row.total_minor))}</td><td><span class="dashboard-status">${esc(row.status)}</span></td></tr>`).join('');
+    if (type === 'cards') return rows.map(row => `<tr><td>${link(row.url, row.number)}</td><td>${bdi(row.vehicle)}</td><td>${esc(row.type)}</td><td>${esc(row.status)}</td><td>${bdi(row.date)}</td></tr>`).join('');
+    if (type === 'movements') return rows.map(row => `<tr><td>${link(row.url, row.number)}</td><td>${esc(row.type)}</td><td>${esc(row.warehouse)}</td><td>${bdi(row.vehicle)}</td><td>${bdi(row.date)}</td></tr>`).join('');
+    return rows.map(row => `<tr><td>${link(row.url, row.reference)}</td><td>${bdi(row.order)}</td><td>${bdi(money(row.amount_minor))}</td><td>${bdi(row.date)}</td></tr>`).join('');
+}
+
+async function loadDashboardRecent(type) {
+    if (dashboardRecentRequest) dashboardRecentRequest.abort();
+    const body = $('#dashboard-recent-body').html('<tr><td colspan="6" class="dashboard-loading"><i class="fa-solid fa-spinner fa-spin"></i> جاري تحميل البيانات...</td></tr>');
+    dashboardRecentRequest = api('dashboard/recent/' + encodeURIComponent(type));
+    try {
+        const rows = await dashboardRecentRequest;
+        if ($('#dashboard-recent-tabs .active').data('type') === type) body.html(dashboardRecentTable(type, rows));
+    } catch (error) {
+        if (error.statusText !== 'abort') body.html('<tr><td colspan="6" class="dashboard-empty">تعذر تحميل البيانات الآن.</td></tr>');
+    } finally {
+        dashboardRecentRequest = null;
+    }
+}
+
+async function loadDashboardChart(period = 'monthly') {
+    const target = $('#dashboard-chart');
+    if (!target.length || typeof ApexCharts === 'undefined') return;
+    target.html('<div class="dashboard-chart-loading"><i class="fa-solid fa-spinner fa-spin"></i> جاري تجهيز المؤشرات...</div>');
+    try {
+        const data = await api('dashboard/chart', 'GET', { period });
+        target.empty();
+        chart = new ApexCharts(target[0], {
+            chart: { type: 'line', height: 330, toolbar: { show: false }, fontFamily: 'Cairo, sans-serif', foreColor: '#71839c', animations: { enabled: true, easing: 'easeinout', speed: 450 } },
+            series: [{ name: 'قيمة الطلبات (ر.س)', type: 'column', data: data.spend }, { name: 'عدد الطلبات', type: 'line', data: data.orders }],
+            colors: ['#0aa6b5', '#1769e8'],
+            stroke: { width: [0, 3], curve: 'smooth' },
+            markers: { size: 4, strokeWidth: 0, hover: { size: 6 } },
+            plotOptions: { bar: { borderRadius: 7, columnWidth: '46%' } },
+            dataLabels: { enabled: false },
+            grid: { borderColor: '#edf2f7', strokeDashArray: 4, padding: { left: 8, right: 8 } },
+            xaxis: { categories: data.labels, axisBorder: { show: false }, axisTicks: { show: false }, labels: { rotate: -35, style: { fontSize: '11px' } } },
+            yaxis: [{ title: { text: 'القيمة (ر.س)' }, labels: { formatter: value => Number(value).toLocaleString('ar-SA') } }, { opposite: true, title: { text: 'الطلبات' }, labels: { formatter: value => Number(value).toLocaleString('ar-SA') } }],
+            tooltip: { shared: true, intersect: false, y: [{ formatter: value => `${Number(value).toLocaleString('ar-SA')} ر.س` }, { formatter: value => Number(value).toLocaleString('ar-SA') }] },
+            legend: { position: 'top', horizontalAlign: 'right', fontSize: '12px', markers: { radius: 6 } },
+            noData: { text: 'لا توجد بيانات لهذه الفترة' },
+        });
+        await chart.render();
+        $('#dashboard-periods button').removeClass('active').filter(`[data-period="${period}"]`).addClass('active');
+    } catch (error) {
+        target.html('<div class="dashboard-chart-loading">تعذر تحميل المؤشرات الآن.</div>');
+    }
+}
+
+function renderDashboardStageChart(counts) {
+    const target = $('#dashboard-stage-chart');
+    if (!target.length || typeof ApexCharts === 'undefined') return;
+    if (stageChart) stageChart.destroy();
+    const stages = workflowStages.map(([, label]) => label);
+    const series = workflowStages.map(([key]) => Number(counts?.[key] || 0));
+    stageChart = new ApexCharts(target[0], {
+        chart: { type: 'donut', height: 330, fontFamily: 'Cairo, sans-serif', toolbar: { show: false } },
+        series,
+        labels: stages,
+        colors: ['#8b9ab0', '#1769e8', '#7459c7', '#e08b15', '#d3a11b', '#15945d', '#079eac', '#506174'],
+        stroke: { width: 3, colors: ['#fff'] },
+        legend: { position: 'bottom', fontSize: '11px', itemMargin: { horizontal: 7, vertical: 3 } },
+        dataLabels: { enabled: true, formatter: value => `${Math.round(value)}%`, style: { fontSize: '11px', fontWeight: 700 } },
+        plotOptions: { pie: { donut: { size: '70%', labels: { show: true, name: { show: true, color: '#71839c', fontSize: '12px' }, value: { show: true, color: '#173152', fontSize: '25px', fontWeight: 700, formatter: value => Number(value).toLocaleString('ar-SA') }, total: { show: true, label: 'إجمالي الطلبات', color: '#71839c', formatter: w => Number(w.globals.seriesTotals.reduce((sum, value) => sum + value, 0)).toLocaleString('ar-SA') } } } } },
+        tooltip: { y: { formatter: value => `${Number(value).toLocaleString('ar-SA')} طلب` } },
+        noData: { text: 'لا توجد طلبات' },
+    });
+    stageChart.render();
+}
+
 async function dashboard() {
     const data = await api('dashboard');
-    const categories = Object.entries(lookup.categories).map(([key, label], index) => `
-        <article class="service-card" style="--accent:${['#0866ff', '#00a5b4', '#e28b36'][index % 3]}">
-            <div class="service-top">
-                <div class="service-copy">
-                    <h2>${esc(label)}</h2>
-                    <p>طلبات مرتبطة، اعتماد متدرج، ومرفقات متابعة جاهزة.</p>
-                </div>
-                <div class="service-icon"><i class="fa-solid fa-${['screwdriver-wrench', 'car-burst', 'gears', 'bolt', 'building', 'boxes-stacked', 'file-invoice'][index] || 'folder-open'}"></i></div>
-            </div>
-            <p class="service-count"><strong>${Number(data.category_counts?.[key] || 0)}</strong> طلب</p>
-            <div class="service-actions">
-                ${can('orders.view') ? `<a class="service-orders" href="#orders?category=${encodeURIComponent(key)}">عرض الطلبات</a>` : ''}
-                ${can('orders.create') ? `<a class="service-add" href="#new?category=${encodeURIComponent(key)}" title="إضافة طلب: ${esc(label)}" aria-label="إضافة طلب: ${esc(label)}"><i class="fa-solid fa-plus" aria-hidden="true"></i></a>` : ''}
-            </div>
-        </article>
-    `).join('');
+    const quickActions = [
+        can('orders.create') && ['طلب شراء جديد', 'cart-shopping', '#new'],
+        can('cards.manage') && ['كارت صيانة جديد', 'screwdriver-wrench', 'card-add'],
+        can('inventory.issue') && ['إذن صرف لسيارة', 'car', 'movement', 'issue'],
+        can('inventory.transfer') && ['تسجيل تحويلة', 'building-columns', 'movement', 'transfer'],
+    ].filter(Boolean);
+    const tabs = [
+        can('orders.view') && ['orders', 'الطلبات', ['رقم الطلب', 'النوع', 'الفرع', 'المورد', 'الإجمالي', 'الحالة']],
+        can('cards.view') && ['cards', 'كروت الصيانة', ['رقم الكارت', 'السيارة', 'النوع', 'الحالة', 'التاريخ']],
+        can('inventory.view') && ['movements', 'حركات المخزون', ['رقم الحركة', 'النوع', 'المخزن', 'السيارة', 'التاريخ']],
+        can('orders.view') && ['payments', 'الحوالات', ['مرجع الحوالة', 'رقم الطلب', 'المبلغ', 'التاريخ']],
+    ].filter(Boolean);
+    const attention = (data.attention || []).map(item => `<a class="dashboard-attention-card dashboard-${esc(item.color)}" href="${esc(item.url)}"><i class="fa-solid fa-${esc(item.icon)}"></i><span>${esc(item.label)}</span><strong>${Number(item.value).toLocaleString('ar-SA')}</strong><b class="fa-solid fa-angle-left"></b></a>`).join('');
+    const actions = quickActions.map(([label, icon, target, type]) => target.startsWith('#') ? `<a class="dashboard-quick-action" href="${target}"><i class="fa-solid fa-${icon}"></i><span>${label}</span></a>` : `<button type="button" class="dashboard-quick-action" data-action="${target}" ${type ? `data-type="${type}"` : ''}><i class="fa-solid fa-${icon}"></i><span>${label}</span></button>`).join('');
+    const summaries = (data.summaries || []).map(summary => `<section class="dashboard-summary-card dashboard-summary-${esc(summary.key)}"><h2><i class="fa-solid fa-${esc(summary.icon)}"></i>${esc(summary.title)}</h2><div>${summary.items.map(item => `<a class="dashboard-summary-metric" href="${esc(item.url || summary.url)}" aria-label="عرض ${esc(item.label)}"><small>${esc(item.label)}</small><strong>${Number(item.value).toLocaleString('ar-SA')}</strong><i class="fa-solid fa-arrow-left"></i></a>`).join('')}</div><a href="${esc(summary.url)}">فتح القسم <i class="fa-solid fa-angle-left"></i></a></section>`).join('');
+    const defaultTab = tabs[0];
 
-    $('#content').html(
-        head('لوحة التحكم', 'متابعة مؤشرات التشغيل والمشتريات والصيانة من شاشة واحدة.', can('orders.create') ? '<a href="#new" class="btn btn-primary"><i class="fa-solid fa-plus"></i>طلب شراء جديد</a>' : '') +
-        `<section class="dashboard-hero"><div><span class="dashboard-eyebrow"><i class="fa-solid fa-sparkles"></i> نظرة تشغيلية مباشرة</span><h2>كل ما يحتاج المتابعة، في مكان واحد.</h2><p>راقب سير الطلبات والسيولة والأصول من ملخص حي وواضح.</p></div><div class="dashboard-hero-pulse"><i class="fa-solid fa-chart-line"></i><span>بيانات محدثة</span></div></section>
-        <div class="stats">${[
-            [Object.values(data.counts).reduce((sum, count) => sum + Number(count), 0), 'إجمالي الطلبات', 'file-invoice'],
-            [money(data.order_total_minor), 'قيمة الطلبات', 'sack-dollar'],
-            [money(data.paid_minor), 'إجمالي المدفوع', 'money-bill-transfer'],
-            [data.vehicles, 'السيارات النشطة', 'car'],
-        ].map(stat => `<div class="stat dashboard-stat"><i class="fa-solid fa-${stat[2]}"></i><div class="dashboard-stat-copy"><strong>${stat[0]}</strong><span>${stat[1]}</span></div></div>`).join('')}</div>
-        <div class="service-grid">${categories}</div>
-        <div class="dashboard-bottom">
-            <section class="panel dashboard-chart-panel">
-                <h2 class="section-title"><span><i class="fa-solid fa-chart-column"></i> توزيع حالات الطلبات</span><small>نظرة حسب الحالة</small></h2>
-                <div id="chart"></div>
-            </section>
-            <section class="panel dashboard-followup-panel">
-                <h2 class="section-title"><span><i class="fa-solid fa-bolt"></i> ملخص المتابعة</span><small>يتطلب انتباهك</small></h2>
-                <div class="dashboard-followup-summary">
-                    ${can('cards.view') ? `<a class="dashboard-followup-link" href="#cards?status=open" aria-label="عرض كروت الصيانة المفتوحة">كروت الصيانة المفتوحة: <b>${data.cards}</b><small>عرض الكروت <i class="fa-solid fa-arrow-left" aria-hidden="true"></i></small></a>` : `<p>كروت الصيانة المفتوحة: <b>${data.cards}</b></p>`}
-                    ${can('inventory.view') ? `<a class="dashboard-followup-link" href="#inventory?low_stock=1" aria-label="عرض الأصناف الأقل من حد إعادة الطلب">أصناف أقل من حد إعادة الطلب: <b>${data.low_stock}</b><small>عرض الأصناف <i class="fa-solid fa-arrow-left" aria-hidden="true"></i></small></a>` : `<p>أصناف أقل من حد إعادة الطلب: <b>${data.low_stock}</b></p>`}
-                </div>
-                <div class="dashboard-recent-list">
-                    ${(data.recent || []).length ? data.recent.map(order => `<a class="quick-link" href="#order/${order.id}"><span><i class="fa-solid fa-file-lines"></i> ${bdi(order.number)}</span><small>${esc(statusLabel(order.status))}</small></a>`).join('') : '<p class="subtext">لا توجد طلبات حديثة.</p>'}
-                </div>
-            </section>
-        </div>`
+    const openOrders = Number(data.counts?.draft || 0) + Number(data.counts?.accountant || 0) + Number(data.counts?.manager || 0) + Number(data.counts?.supervisor || 0) + Number(data.counts?.matching || 0) + Number(data.counts?.ready || 0);
+    const stats = [
+        ['إجمالي الطلبات', Object.values(data.counts || {}).reduce((sum, value) => sum + Number(value), 0), 'file-invoice', 'blue'],
+        ['طلبات مفتوحة', openOrders, 'layer-group', 'teal'],
+        ['إجمالي المشتريات', money(data.order_total_minor), 'chart-line', 'green'],
+        ['السيارات النشطة', data.vehicles || 0, 'car-side', 'orange'],
+    ].map(([label, value, icon, color]) => `<div class="dashboard-kpi dashboard-kpi-${color}"><i class="fa-solid fa-${icon}"></i><div><small>${label}</small><strong>${typeof value === 'string' ? value : Number(value).toLocaleString('ar-SA')}</strong></div></div>`).join('');
+    $('#content').html(head('الرئيسية', 'نظرة سريعة على أعمالك اليوم.') + `
+        <section class="dashboard-hero"><div><span class="dashboard-eyebrow"><i class="fa-solid fa-sparkles"></i> مركز المتابعة</span><h2>صباحك أسهل مع روتانا</h2><p>تابع المشتريات، الصيانة والمخزون من شاشة واحدة.</p></div><div class="dashboard-hero-pulse"><i class="fa-solid fa-chart-line"></i><span>ملخص تشغيلي مباشر</span></div></section>
+        <section class="dashboard-kpi-grid">${stats}</section>
+        <div class="dashboard-charts-grid"><section class="dashboard-reference-panel dashboard-chart-panel"><div class="dashboard-chart-head"><div><h2><i class="fa-solid fa-chart-area"></i> حركة الأعمال</h2><small>مقارنة قيمة الطلبات وعددها خلال الفترة المحددة</small></div><div class="dashboard-periods" id="dashboard-periods"><button type="button" data-period="daily">يومي</button><button type="button" data-period="weekly">أسبوعي</button><button type="button" data-period="monthly" class="active">شهري</button><button type="button" data-period="yearly">سنوي</button></div></div><div id="dashboard-chart"></div></section>
+        <section class="dashboard-reference-panel dashboard-stage-panel"><div class="dashboard-chart-head"><div><h2><i class="fa-solid fa-chart-pie"></i> توزيع الطلبات حسب المرحلة</h2><small>نظرة سريعة على حالة دورة المشتريات</small></div></div><div id="dashboard-stage-chart"></div></section></div>
+        ${(attention || actions) ? `<div class="dashboard-focus-grid">${attention ? `<section class="dashboard-reference-panel"><h2><i class="fa-solid fa-bolt"></i> مطلوب منك الآن</h2><div class="dashboard-attention-grid">${attention}</div></section>` : ''}${actions ? `<section class="dashboard-reference-panel"><h2><i class="fa-solid fa-wand-magic-sparkles"></i> إجراءات سريعة</h2><div class="dashboard-quick-grid">${actions}</div></section>` : ''}</div>` : ''}
+        ${summaries ? `<section class="dashboard-reference-panel"><h2>ملخص الأقسام</h2><div class="dashboard-summary-grid">${summaries}</div></section>` : ''}
+        ${defaultTab ? `<section class="dashboard-reference-panel dashboard-recent-panel"><h2>آخر العمليات</h2><div class="dashboard-tabs" id="dashboard-recent-tabs">${tabs.map(([type, label]) => `<button type="button" class="${type === defaultTab[0] ? 'active' : ''}" data-type="${type}">${label}</button>`).join('')}</div><div class="dashboard-table-wrap"><table class="table dashboard-recent-table"><thead id="dashboard-recent-head"><tr>${defaultTab[2].map(label => `<th>${label}</th>`).join('')}</tr></thead><tbody id="dashboard-recent-body"></tbody></table></div></section>` : '<section class="panel">لا توجد أقسام متاحة في لوحة التحكم حسب صلاحياتك.</section>'}`
     );
 
-    chart = new ApexCharts(document.querySelector('#chart'), {
-        chart: { type: 'bar', height: 320, toolbar: { show: false }, fontFamily: 'Cairo, system-ui, sans-serif' },
-        series: [{ name: 'الطلبات', data: Object.values(data.counts).map(Number) }],
-        xaxis: {
-            categories: Object.keys(data.counts).map(key => statusLabel(key)),
-            labels: {
-                rotate: -25,
-                trim: false,
-                hideOverlappingLabels: false,
-                style: { fontFamily: 'Cairo, system-ui, sans-serif', fontSize: '12px' },
-            },
-        },
-        yaxis: { labels: { style: { fontFamily: 'Cairo, system-ui, sans-serif' } } },
-        tooltip: { theme: 'light' },
-        colors: ['#00a5b4'],
-        dataLabels: { enabled: false },
-        grid: { padding: { left: 12, right: 12, bottom: 6 } },
-        responsive: [
-            { breakpoint: 1200, options: { chart: { height: 310 } } },
-            { breakpoint: 768, options: { chart: { height: 300 }, xaxis: { labels: { rotate: -35 } } } },
-        ],
+    $('#dashboard-recent-tabs').off('click.dashboard').on('click.dashboard', 'button', function () {
+        const type = this.dataset.type;
+        const tab = tabs.find(item => item[0] === type);
+        $('#dashboard-recent-tabs button').removeClass('active');
+        $(this).addClass('active');
+        $('#dashboard-recent-head').html(`<tr>${tab[2].map(label => `<th>${label}</th>`).join('')}</tr>`);
+        loadDashboardRecent(type);
     });
-    chart.render();
+    if (defaultTab) loadDashboardRecent(defaultTab[0]);
+    $('#dashboard-periods').off('click.dashboard').on('click.dashboard', 'button', function () { loadDashboardChart(this.dataset.period); });
+    loadDashboardChart();
+    renderDashboardStageChart(data.counts || {});
 }
 
 function excelButtons(kind) {
     return `${can('excel.export') ? `<a class="btn btn-light" id="export-link" href="/api/excel/export/${kind}"><i class="fa-solid fa-file-excel"></i>تصدير إكسل</a>` : ''}${kind !== 'orders' && can('excel.import') && can(permission(kind)) ? `<a class="btn btn-light" href="/api/excel/template/${kind}"><i class="fa-solid fa-download"></i>تحميل نموذج الاستيراد</a>${button('استيراد إكسل', 'import', 'file-import', `data-kind="${kind}"`)}` : ''}`;
 }
 
-function orders(report = false, category = '') {
+function orders(report = false, category = '', status = '', open = false) {
     $('#content').html(
         head(report ? 'تقارير الطلبات' : 'طلبات الشراء', 'متابعة الدورة من تسجيل الطلب إلى المطابقة والدفع.', (!report && can('orders.create') ? '<a class="btn btn-primary" href="#new"><i class="fa-solid fa-plus"></i>طلب شراء جديد</a>' : '') + excelButtons('orders')) +
+        (!report ? '<section class="order-summary-grid" id="order-summary" aria-label="ملخص طلبات الشراء"><div class="order-summary-loading"><i class="fa-solid fa-spinner fa-spin"></i> جاري تحميل الملخص...</div></section>' : '') +
         `<div class="panel po-filter-panel">
             <form id="filters" class="form-grid">
-                ${select('status', 'الحالة', Object.entries(statuses).map(([id, name]) => ({ id, name })), '', '', { placeholder: 'كل الحالات' })}
+                ${select('status', 'الحالة', Object.entries(statuses).map(([id, name]) => ({ id, name })), status, '', { placeholder: 'كل الحالات' })}
                 ${select('branch_id', 'الفرع', lookup.branches, '', '', { placeholder: 'كل الفروع' })}
                 ${select('supplier_id', 'المورد', lookup.suppliers, '', 'suppliers', { placeholder: 'كل الموردين' })}
                 ${select('vehicle_id', 'السيارة', lookup.vehicles, '', '', { placeholder: 'كل السيارات' })}
                 ${select('category', 'نوع الطلب', Object.entries(lookup.categories).map(([id, name]) => ({ id, name })), category, '', { placeholder: 'كل الأنواع' })}
                 ${field('from', 'من تاريخ', '', 'date', false)}
                 ${field('to', 'إلى تاريخ', '', 'date', false)}
-                <div class="field"><label>&nbsp;</label><button class="btn btn-light w-100"><i class="fa-solid fa-filter"></i>تطبيق التصفية</button></div>
+                <div class="field order-filter-actions"><label>&nbsp;</label><div><button class="btn btn-light" type="submit"><i class="fa-solid fa-filter"></i>تطبيق التصفية</button><button class="btn btn-outline-secondary clear-order-filters" id="clear-order-filters" type="button" disabled><i class="fa-solid fa-rotate-left"></i>مسح الفلاتر</button></div></div>
             </form>
         </div>
         <div class="panel po-table-panel" id="grid-area"></div>`
     );
 
     enhance();
-    $('#export-link').attr('href', '/api/excel/export/orders?' + new URLSearchParams({ category }));
-    grid('orders?' + new URLSearchParams({ category }), [
+    const initialQuery = new URLSearchParams({ category, status, open: open ? '1' : '' });
+    $('#export-link').attr('href', '/api/excel/export/orders?' + initialQuery);
+    loadOrderSummary(initialQuery);
+    grid('orders?' + initialQuery, [
         selectColumn(),
         col('number', 'رقم الطلب', { className: 'po-code', render: value => bdi(value) }),
         col('date', 'التاريخ', { className: 'po-date', render: value => bdi(value) }),
+        col('category', 'نوع الطلب', { className: 'po-category', render: (value, type) => type === 'display' ? esc(lookup.categories?.[value] || value) : value }),
         col('branch_name', 'الفرع'),
         col('supplier_name', 'المورد'),
         col('vehicle_plate', 'السيارة', { className: 'po-code', render: value => value ? bdi(value) : '—' }),
@@ -679,7 +764,131 @@ function orders(report = false, category = '') {
         const query = new URLSearchParams(formData(this));
         table.ajax.url('/api/orders?' + query).load();
         $('#export-link').attr('href', '/api/excel/export/orders?' + query);
+        loadOrderSummary(query);
+        updateOrderClearButton();
     });
+    $('#clear-order-filters').on('click', function () {
+        $('#filters')[0].reset();
+        $('#filters select').val('').trigger('change');
+        if (table) table.search('').draw();
+        location.hash = '#orders';
+    });
+    $('#records_wrapper').on('input', '.dt-search input, .dataTables_filter input', updateOrderClearButton);
+    updateOrderClearButton();
+}
+
+function updateOrderClearButton() {
+    const form = $('#filters');
+    if (!form.length) return;
+    const hasFormFilters = Object.values(formData(form[0])).some(value => String(value || '').trim() !== '');
+    const hasSearch = Boolean(table?.search());
+    $('#clear-order-filters').prop('disabled', !(hasFormFilters || hasSearch));
+}
+
+const orderSummaryStyles = {
+    maintenance: ['screwdriver-wrench', 'blue'], damage: ['car-burst', 'red'], parts: ['gears', 'purple'],
+    utilities: ['bolt', 'orange'], branches: ['building', 'teal'], stock: ['boxes-stacked', 'green'], quotes: ['file-signature', 'gold'],
+};
+const statusStyles = {
+    draft: ['file-pen', 'blue'], accountant: ['calculator', 'blue'], manager: ['user-tie', 'purple'], supervisor: ['user-check', 'purple'],
+    matching: ['file-circle-check', 'gold'], ready: ['money-bill-wave', 'green'], paid: ['building-columns', 'teal'], closed: ['lock', 'green'], rejected: ['ban', 'red'],
+};
+
+async function loadOrderSummary(query) {
+    const target = $('#order-summary');
+    if (!target.length) return;
+    try {
+        const cards = await api('orders/summary?' + query.toString());
+        if (!target.length) return;
+        const renderCard = (card, dimension, icon, color) => {
+            const value = card[dimension];
+            const cardQuery = new URLSearchParams(query);
+            if (value === 'all') cardQuery.delete(dimension); else cardQuery.set(dimension, value);
+            const active = value === 'all' ? !query.get(dimension) : value === query.get(dimension);
+            return `<a class="order-summary-card order-summary-${color} ${active ? 'active' : ''}" href="#orders?${cardQuery}" aria-label="عرض ${esc(card.label)}"><span class="order-summary-icon"><i class="fa-solid fa-${icon}"></i></span><span class="order-summary-copy"><strong>${esc(card.count)}</strong><span>${esc(card.label)}</span></span>${active ? '<em class="order-summary-selected">محدد</em>' : ''}<i class="fa-solid fa-arrow-left order-summary-arrow"></i></a>`;
+        };
+        const categoryCards = cards.categories.map(card => {
+            const [icon, color] = card.category === 'all' ? ['layer-group', 'teal'] : (orderSummaryStyles[card.category] || ['file-invoice', 'blue']);
+            return renderCard(card, 'category', icon, color);
+        }).join('');
+        const statusCards = cards.statuses.map(card => renderCard(card, 'status', card.status === 'all' ? 'layer-group' : (statusStyles[card.status]?.[0] || 'file-lines'), card.status === 'all' ? 'teal' : (statusStyles[card.status]?.[1] || 'blue'))).join('');
+        target.html(`<div class="order-summary-heading">حسب النوع</div><div class="order-summary-cards">${categoryCards}</div><div class="order-summary-heading">حسب الحالة</div><div class="order-summary-cards">${statusCards}</div>`);
+    } catch (error) {
+        target.html('<div class="order-summary-error">تعذر تحميل ملخص الطلبات.</div>');
+    }
+}
+
+function vehicleLog(routeParams = new URLSearchParams()) {
+    const selectedVehicle = lookup.vehicles.find(vehicle => String(vehicle.id) === String(routeParams.get('vehicle_id')));
+    $('#content').html(
+        head('سجل عمليات السيارة', 'عرض الطلبات وكروت الصيانة المرتبطة بالسيارات مع التصفية حسب الفترة والمورد.', '') +
+        `<section class="panel po-filter-panel vehicle-log-filter-panel">
+            <form id="vehicle-log-filters" class="form-grid">
+                ${select('vehicle_id', 'السيارة', lookup.vehicles, routeParams.get('vehicle_id') || '', '', { placeholder: 'كل السيارات' })}
+                ${select('supplier_id', 'المورد', lookup.suppliers, '', '', { placeholder: 'كل الموردين' })}
+                ${field('date_from', 'من تاريخ', routeParams.get('date_from') || '', 'date', false)}
+                ${field('date_to', 'إلى تاريخ', routeParams.get('date_to') || '', 'date', false)}
+                <div class="field"><label>&nbsp;</label><button class="btn btn-light w-100"><i class="fa-solid fa-filter"></i>تطبيق التصفية</button></div>
+            </form>
+        </section>
+        <section class="panel vehicle-log-vehicle-card" id="vehicle-log-vehicle-card">${vehicleLogVehicleCard(selectedVehicle)}</section>
+        <section class="vehicle-log-summary-grid" id="vehicle-log-summary" aria-label="ملخص سجل السيارة">${vehicleLogSummaryCards()}</section>
+        <div class="panel" id="grid-area"></div>`
+    );
+    enhance();
+    loadVehicleLogSummary(routeParams);
+    loadVehicleLogGrid(routeParams);
+    $('#vehicle-log-filters').on('submit', function (event) {
+        event.preventDefault();
+        const query = new URLSearchParams(formData(this));
+        const vehicle = lookup.vehicles.find(item => String(item.id) === String(query.get('vehicle_id')));
+        $('#vehicle-log-vehicle-card').html(vehicleLogVehicleCard(vehicle));
+        loadVehicleLogSummary(query);
+        loadVehicleLogGrid(query);
+    });
+    $('#vehicle-log-filters [name=vehicle_id]').on('change', function () {
+        const vehicle = lookup.vehicles.find(item => String(item.id) === String(this.value));
+        $('#vehicle-log-vehicle-card').html(vehicleLogVehicleCard(vehicle));
+    });
+}
+
+function vehicleLogVehicleCard(vehicle) {
+    if (!vehicle) return '<div class="subtext">اختر سيارة لعرض بياناتها الأساسية، أو اترك الفلتر فارغًا لعرض سجل جميع السيارات.</div>';
+    return `<div class="vehicle-log-summary"><div class="vehicle-log-vehicle-icon"><i class="fa-solid fa-car-side"></i></div><div class="vehicle-log-vehicle-title"><strong>${bdi(vehicle.plate)}</strong><span>${esc(vehicle.model)} — ${esc(vehicle.year)}</span></div><div><small>رقم الهيكل</small><bdi>${vehicle.vin || '—'}</bdi></div><div><small>قراءة العداد</small><bdi>${Number(vehicle.odometer || 0).toLocaleString('ar-SA')}</bdi></div></div>`;
+}
+
+function vehicleLogSummaryCards(data = null) {
+    if (!data) return ['السجلات', 'طلبات الشراء', 'كروت الصيانة', 'إجمالي المطلوب', 'إجمالي المدفوع'].map((label, index) => `<article class="vehicle-log-summary-card vehicle-log-summary-card-${index + 1}"><div class="vehicle-log-summary-icon"><i class="fa-solid fa-${['list-check', 'file-invoice', 'screwdriver-wrench', 'wallet', 'circle-check'][index]}"></i></div><div><span>${label}</span><strong>—</strong><small>جارٍ تحديث الملخص</small></div></article>`).join('');
+    const cards = [
+        ['السجلات', data.records, 'سجل مرتبط بالفلاتر الحالية', 'list-check'],
+        ['طلبات الشراء', data.orders, 'طلب شراء', 'file-invoice'],
+        ['كروت الصيانة', data.cards, 'كارت صيانة', 'screwdriver-wrench'],
+        ['إجمالي المطلوب', money(data.total_minor), 'ريال سعودي', 'wallet'],
+        ['إجمالي المدفوع', money(data.paid_minor), 'ريال سعودي', 'circle-check'],
+    ];
+    return cards.map(([label, value, hint, icon], index) => `<article class="vehicle-log-summary-card vehicle-log-summary-card-${index + 1}"><div class="vehicle-log-summary-icon"><i class="fa-solid fa-${icon}"></i></div><div><span>${label}</span><strong>${esc(value)}</strong><small>${hint}</small></div></article>`).join('');
+}
+
+function loadVehicleLogSummary(query = new URLSearchParams()) {
+    api('vehicle-log/summary', 'GET', Object.fromEntries(query.entries())).done(data => {
+        $('#vehicle-log-summary').html(vehicleLogSummaryCards(data));
+    });
+}
+
+function loadVehicleLogGrid(query = null) {
+    const params = query || new URLSearchParams();
+    grid('vehicle-log' + (params.toString() ? '?' + params : ''), [
+        col('number', 'رقم الطلب / الكارت', { className: 'po-code', render: (value, type, row) => `<a href="${esc(row.url)}">${bdi(value)}</a>` }),
+        col('date', 'التاريخ', { className: 'po-date', render: value => bdi(value) }),
+        col('type', 'النوع'),
+        col('vehicle', 'السيارة', { className: 'po-code', render: value => bdi(value) }),
+        col('supplier', 'المورد', { render: value => bdi(value) }),
+        col('service', 'الخدمة / التفاصيل', { render: value => esc(value || '—') }),
+        col('total', 'المبلغ المطلوب', { className: 'po-money', render: value => bdi(value) }),
+        col('paid', 'المبلغ المدفوع', { className: 'po-money', render: value => bdi(value) }),
+        col('status', 'الحالة', { className: 'po-status-cell', render: value => `<span class="badge po-status">${esc(value)}</span>` }),
+    ], { order: [[1, 'desc']], pageLength: 10 });
+    $('#records').addClass('vehicle-log-table').attr('aria-label', 'سجل عمليات السيارات');
 }
 
 const poOptionLabel = row => row.label || row.name || row.plate || row.title || row.code || row.email;
@@ -1037,6 +1246,7 @@ function masterColumns(kind) {
     }[kind] || [...base, col('name', 'الاسم')];
 
     columns.push({ data: 'active', title: 'الحالة', className: 'master-state-cell', render: value => activeBadge(value) });
+    if (kind === 'vehicles' && can('reports.view')) columns.push({ data: 'id', title: 'سجل السيارة', orderable: false, searchable: false, className: 'master-actions', render: id => `<a class="btn btn-light compact-action action-details" href="#vehicle-log?vehicle_id=${Number(id)}" aria-label="عرض سجل السيارة"><i class="fa-solid fa-clock-rotate-left"></i><span>السجل</span></a>` });
     if (can(permission(kind))) columns.push({ data: null, title: 'تعديل', orderable: false, searchable: false, className: 'master-actions', render: () => '<button class="btn btn-light row-edit compact-action" aria-label="تعديل"><i class="fa-solid fa-pen"></i><span>تعديل</span></button>' });
 
     return columns;
@@ -1061,7 +1271,7 @@ function masters(kind, focusId = null) {
     if (!focused) enableBulkDelete(kind, 'masters.delete');
 }
 
-function inventoryTable(showMovements, lowStock = false) {
+function inventoryTable(showMovements, lowStock = false, movementType = '') {
     let warehouseId = $('[name=warehouse_id]').val();
     if (!showMovements && !warehouseId) {
         warehouseId = lookup.warehouses[0]?.id;
@@ -1070,6 +1280,7 @@ function inventoryTable(showMovements, lowStock = false) {
 
     const query = new URLSearchParams({ warehouse_id: warehouseId || '' });
     if (!showMovements && lowStock) query.set('low_stock', '1');
+    if (showMovements && movementType) query.set('type', movementType);
     grid('inventory/' + (showMovements ? 'movements' : 'balances') + '?' + query.toString(), showMovements
         ? [
             selectColumn(),
@@ -1080,6 +1291,7 @@ function inventoryTable(showMovements, lowStock = false) {
             col('vehicle.plate', 'السيارة', { className: 'inventory-code', render: value => value ? bdi(value) : '—' }),
             { data: 'lines', title: 'البنود', orderable: false, searchable: false, className: 'inventory-lines', render: lines => (lines || []).map(line => `<span>${esc(line.item?.sku || '')} ${esc(line.item?.name || 'صنف')}</span><bdi>${quantityText(line.quantity_milli)}</bdi>`).join('<br>') || '—' },
             col('notes', 'الملاحظات', { className: 'inventory-notes' }),
+            { data: null, title: 'التفاصيل', orderable: false, searchable: false, className: 'inventory-actions', render: () => '<button type="button" class="btn btn-light compact-action movement-details" aria-label="عرض تفاصيل الحركة"><i class="fa-solid fa-eye"></i><span>تفاصيل</span></button>' },
         ]
         : [
             selectColumn(),
@@ -1095,23 +1307,69 @@ function inventoryTable(showMovements, lowStock = false) {
         .closest('.table-responsive')
         .addClass('inventory-table-wrap');
     enableBulkDelete(showMovements ? 'movements' : 'stock-balances', 'inventory.delete', showMovements ? {} : { warehouse_id: Number(warehouseId) });
+    if (showMovements) {
+        $('#records').off('click.movementDetails', '.movement-details').on('click.movementDetails', '.movement-details', function () {
+            movementDetails(table.row($(this).closest('tr')).data());
+        });
+    }
+}
+
+function movementLine(index) {
+    const itemOptions = lookup.items.filter(item => item.track_stock);
+    const itemSelect = select(`movement_item_${index}`, 'الصنف', itemOptions).replace('<select ', '<select required ');
+    return `<tr class="inventory-movement-line">
+        <td>${itemSelect}</td>
+        <td>${field(`movement_quantity_${index}`, 'الكمية', 1, 'number', true, 'step="1" min="1"')}</td>
+        <td><button type="button" class="btn btn-light text-danger movement-line-remove" aria-label="حذف البند"><i class="fa-solid fa-trash"></i></button></td>
+    </tr>`;
+}
+
+function movementDetails(row) {
+    const lines = (row?.lines || []).map(line => `<tr><td>${esc(line.item?.sku || '—')}</td><td>${esc(line.item?.name || 'صنف')}</td><td><bdi>${quantityText(line.quantity_milli)}</bdi></td><td><bdi>${money(line.unit_cost_minor)}</bdi></td></tr>`).join('');
+    const destination = row.destination_warehouse?.name || '—';
+    openModal(`تفاصيل ${row.number || 'الحركة'}`, `<div class="details-grid">
+        <div><small>رقم الحركة</small><bdi>${esc(row.number || '—')}</bdi></div>
+        <div><small>نوع الحركة</small>${movementBadge(row.type)}</div>
+        <div><small>التاريخ</small><bdi>${esc(row.date || '—')}</bdi></div>
+        <div><small>المخزن</small>${esc(row.warehouse?.name || '—')}</div>
+        <div><small>المخزن المستلم</small>${esc(destination)}</div>
+        <div><small>السيارة</small>${esc(row.vehicle?.plate || '—')}</div>
+    </div><div class="table-responsive mt-4"><table class="table inventory-detail-lines"><thead><tr><th>الكود</th><th>الصنف</th><th>الكمية/الأثر</th><th>تكلفة الوحدة</th></tr></thead><tbody>${lines || '<tr><td colspan="4">لا توجد بنود.</td></tr>'}</tbody></table></div><p class="subtext mt-3">${esc(row.notes || 'لا توجد ملاحظات مسجلة.')}</p>`, () => Promise.resolve());
+    $('#editor-form button[type=submit]').hide();
 }
 
 function movement(type) {
-    openModal('حركة مخزنية', `<div class="form-grid">${select('warehouse_id', 'المخزن', lookup.warehouses)}${type === 'transfer' ? select('destination_warehouse_id', 'المخزن المستلم', lookup.warehouses) : ''}${type === 'issue' ? select('vehicle_id', 'السيارة', lookup.vehicles) + field('odometer', 'قراءة العداد', 0, 'number') : ''}${type === 'return' ? field('source_movement_id', 'رقم إذن الصرف الأصلي', '', 'number') : ''}${field('date', 'التاريخ', today(), 'date')}${select('item_id', 'الصنف', lookup.items.filter(item => item.track_stock))}${field('quantity', type === 'adjust' ? 'العدد الفعلي بالجرد' : 'الكمية', 1, 'number')}${textareaField('notes', 'سبب الحركة', '', type === 'adjust')}</div>`, data => {
-        data.lines = [{ item_id: data.item_id, quantity: data.quantity }];
+    const lineLabel = type === 'adjust' ? 'العدد الفعلي بالجرد' : 'الكمية';
+    openModal('حركة مخزنية', `<div class="form-grid">${select('warehouse_id', 'المخزن', lookup.warehouses)}${type === 'transfer' ? select('destination_warehouse_id', 'المخزن المستلم', lookup.warehouses) : ''}${type === 'issue' ? select('vehicle_id', 'السيارة', lookup.vehicles) + field('odometer', 'قراءة العداد', 0, 'number') : ''}${type === 'return' ? field('source_movement_id', 'رقم إذن الصرف الأصلي', '', 'number') : ''}${field('date', 'التاريخ', today(), 'date')}</div><section class="movement-lines-section"><div class="movement-lines-head"><h3>بنود الحركة</h3><button type="button" class="btn btn-light" id="movement-line-add"><i class="fa-solid fa-plus"></i>إضافة بند</button></div><div class="table-responsive"><table class="table movement-lines-table"><thead><tr><th>الصنف</th><th>${lineLabel}</th><th>إجراء</th></tr></thead><tbody id="movement-lines">${movementLine(0)}</tbody></table></div></section><div class="mt-3">${textareaField('notes', 'سبب الحركة', '', type === 'adjust')}</div>`, data => {
+        data.lines = $('#movement-lines .inventory-movement-line').map(function () {
+            return { item_id: $(this).find('select').val(), quantity: $(this).find('input[type=number]').val() };
+        }).get();
+        if (!data.lines.length || data.lines.some(line => !line.item_id || !line.quantity)) {
+            return Promise.reject({ status: 422, responseJSON: { errors: { lines: ['أكمل الصنف والكمية لكل بند.'] } } });
+        }
         data.type = type;
         data.request_key = crypto.randomUUID();
         return api('inventory/movements', 'POST', data);
+    });
+    $('#movement-line-add').on('click', function () {
+        const index = $('#movement-lines tr').length;
+        $('#movement-lines').append(movementLine(index));
+        enhance($('#movement-lines tr').last());
+    });
+    $('#movement-lines').on('click', '.movement-line-remove', function () {
+        if ($('#movement-lines tr').length === 1) return toastr.info('يجب الإبقاء على بند واحد على الأقل.');
+        $(this).closest('tr').remove();
     });
 }
 
 function inventory(routeParams = new URLSearchParams()) {
     const lowStock = routeParams.get('low_stock') === '1';
-    const subtitle = lowStock ? 'عرض الأصناف التي تقل أرصدتها عن حد إعادة الطلب في المخزن المحدد.' : 'عرض الأرصدة الفعلية وتسجيل الصرف والتحويل والمرتجعات وتسويات الجرد.';
+    const showMovements = routeParams.get('movements') === '1';
+    const movementType = Object.hasOwn(movementTypes, routeParams.get('type')) ? routeParams.get('type') : '';
+    const subtitle = lowStock ? 'عرض الأصناف التي تقل أرصدتها عن حد إعادة الطلب في المخزن المحدد.' : (showMovements ? `عرض ${movementType ? movementLabel(movementType) : 'سجل الحركات'} حسب نطاق صلاحياتك.` : 'عرض الأرصدة الفعلية وتسجيل الصرف والتحويل والمرتجعات وتسويات الجرد.');
     $('#content').html(head('المخزون والحركات', subtitle, Object.entries(movementTypes).filter(([key]) => can('inventory.' + key)).map(([key, label]) => button(label, 'movement', 'boxes-stacked', `data-type="${key}"`)).join('')) + `<div class="panel">${lowStock ? '<div class="inventory-filter-notice"><i class="fa-solid fa-triangle-exclamation"></i> يتم عرض الأصناف الأقل من حد إعادة الطلب.</div>' : ''}<div class="form-grid">${select('warehouse_id', 'المخزن', lookup.warehouses)}</div><div class="action-bar">${button('عرض الأرصدة', 'balances', 'cubes')}${button('عرض سجل الحركات', 'movements', 'list')}</div><div id="grid-area"></div></div>`);
     enhance();
-    inventoryTable(false, lowStock);
+    inventoryTable(showMovements, lowStock, movementType);
 }
 
 function cardFilterQuery(includeStatus = true) {
@@ -1151,7 +1409,8 @@ function cardEditor(row) {
 }
 
 function cards(routeParams = new URLSearchParams()) {
-    const initialStatus = routeParams.get('status') === 'open' ? 'open' : '';
+    const requestedStatus = routeParams.get('status');
+    const initialStatus = requestedStatus === 'open' || Object.hasOwn(cardStatuses, requestedStatus) ? requestedStatus : '';
     const stageFilters = `<option value="">كل المراحل</option><option value="open">الكروت المفتوحة</option>${Object.entries(cardStatuses).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}`;
     const stageSummary = Object.entries(cardStatuses).map(([status]) => `<button type="button" class="stage-summary-card" id="stage-summary-${status}" data-stage="${status}" aria-label="عرض كروت مرحلة ${cardStatuses[status]}"></button>`).join('');
     $('#content').html(head('كروت الصيانة', 'تابع الكروت حسب المرحلة، ثم افتح التفاصيل أو عدّل السجل عند الحاجة.', can('cards.manage') ? button('كارت صيانة جديد', 'card-add') : '') + `<section class="panel card-filter-panel"><div class="card-filter-head"><div><h2 class="section-title">تصفية الكروت</h2><p class="subtext">حدّد التاريخ أو السيارة أو المرحلة لتحديث النتائج.</p></div><button type="button" id="clear-card-filters" class="btn btn-light"><i class="fa-solid fa-rotate-left"></i>مسح الفلاتر</button></div><div class="form-grid card-filters"><div class="field"><label for="card-date-from">من تاريخ</label><input id="card-date-from" class="form-control" type="date"></div><div class="field"><label for="card-date-to">إلى تاريخ</label><input id="card-date-to" class="form-control" type="date"></div><div class="field"><label for="card-vehicle-filter">السيارة</label><select id="card-vehicle-filter" class="form-select searchable"><option value="">كل السيارات</option>${lookup.vehicles.map(vehicle => `<option value="${vehicle.id}">${esc(vehicle.plate)}</option>`).join('')}</select></div><div class="field"><label for="card-stage-filter">المرحلة</label><select id="card-stage-filter" class="form-select">${stageFilters}</select></div></div></section><section class="stage-summary-grid" aria-label="ملخص الكروت حسب المرحلة">${stageSummary}</section><div class="panel" id="grid-area"></div>`);

@@ -2,6 +2,7 @@
 
 return [
     'categories' => ['maintenance' => 'صيانة سيارات', 'damage' => 'حوادث وتلفيات', 'parts' => 'قطع غيار سيارات', 'utilities' => 'كهرباء ومياه وخدمات', 'branches' => 'مصروفات الفروع', 'stock' => 'تزويد مخزون', 'quotes' => 'عروض الأسعار'],
+    'statuses' => ['draft' => 'مسودة', 'accountant' => 'مراجعة المحاسب', 'manager' => 'اعتماد المدير', 'supervisor' => 'اعتماد المشرف', 'matching' => 'مطابقة قبل التحويل', 'ready' => 'جاهز للتحويل', 'paid' => 'تم التحويل', 'closed' => 'مغلق', 'rejected' => 'مرفوض'],
     'photo_labels' => ['front' => 'أمام', 'back' => 'خلف', 'right' => 'يمين', 'left' => 'يسار', 'angle_front' => 'أمامي يمين', 'angle_back' => 'خلفي يسار', 'interior' => 'الداخلية', 'odometer' => 'العداد', 'damage' => 'موضع الضرر'],
     'permissions' => ['dashboard.view', 'orders.view', 'orders.create', 'orders.update', 'orders.submit', 'orders.review', 'orders.approve_manager', 'orders.approve_supervisor', 'orders.approve_own', 'orders.reject', 'orders.match', 'orders.close', 'orders.delete', 'receipts.manage', 'invoices.manage', 'payments.create', 'media.upload', 'inventory.view', 'inventory.issue', 'inventory.transfer', 'inventory.return', 'inventory.adjust', 'inventory.delete', 'cards.view', 'cards.manage', 'vehicles.view', 'vehicles.manage', 'suppliers.view', 'suppliers.manage', 'items.view', 'items.manage', 'masters.manage', 'masters.delete', 'users.manage', 'roles.manage', 'activity.view', 'reports.view', 'excel.import', 'excel.export'],
     'role_labels' => [

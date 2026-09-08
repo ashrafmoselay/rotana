@@ -281,6 +281,20 @@ class RotanaTest extends TestCase
         $this->assertNotContains('PO-FILTER-OTHER', $numbers);
     }
 
+    public function test_purchase_orders_summary_uses_listing_filters(): void
+    {
+        $stockReadyBefore = PurchaseOrder::where('status', 'ready')->where('category', 'stock')->count();
+        $maintenanceReadyBefore = PurchaseOrder::where('status', 'ready')->where('category', 'maintenance')->count();
+        $this->createOrderForBranch(1, ['category' => 'stock', 'status' => 'ready']);
+        $this->createOrderForBranch(1, ['category' => 'maintenance', 'status' => 'draft']);
+
+        $summary = $this->getJson('/api/orders/summary?status=ready')->assertOk()->json();
+        $counts = collect($summary['categories'])->pluck('count', 'category');
+
+        $this->assertSame($stockReadyBefore + 1, $counts['stock']);
+        $this->assertSame($maintenanceReadyBefore, $counts['maintenance']);
+    }
+
     public function test_purchase_orders_listing_orders_by_supported_columns_and_searches_supported_fields(): void
     {
         $low = $this->createOrderForBranch(1, ['number' => 'PO-SORT-LOW', 'supplier_name' => 'مورد ترتيب ألف', 'total_minor' => 1000]);

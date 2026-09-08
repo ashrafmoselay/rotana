@@ -175,6 +175,22 @@ class RemainingFormsTest extends TestCase
         $this->postJson('/api/inventory/movements', $payload)->assertUnprocessable()->assertJsonValidationErrors(['inventory']);
     }
 
+    public function test_inventory_movement_can_save_multiple_lines_and_updates_each_balance(): void
+    {
+        $before = StockBalance::where('warehouse_id', 1)->pluck('quantity_milli', 'item_id');
+
+        $movement = $this->postJson('/api/inventory/movements', $this->movement([
+            'lines' => [
+                ['item_id' => 1, 'quantity' => 1],
+                ['item_id' => 2, 'quantity' => 2],
+            ],
+        ]))->assertCreated()->json();
+
+        $this->assertCount(2, $movement['lines']);
+        $this->assertSame($before[1] - 1000, StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli'));
+        $this->assertSame($before[2] - 2000, StockBalance::where('warehouse_id', 1)->where('item_id', 2)->value('quantity_milli'));
+    }
+
     public function test_user_and_role_forms_validate_permissions_json_shape_and_protections(): void
     {
         auth()->logout();

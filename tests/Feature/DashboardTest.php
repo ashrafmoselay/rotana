@@ -290,6 +290,27 @@ class DashboardTest extends TestCase
         );
     }
 
+    public function test_dashboard_recent_tabs_respect_permissions_and_branch_scope(): void
+    {
+        $branch = Branch::where('code', 'B2')->firstOrFail();
+        $otherBranch = Branch::where('code', 'B3')->firstOrFail();
+        $user = $this->dashboardUser([$branch->id]);
+        $visible = $this->orderForBranch($branch->id, ['number' => 'DASH-TAB-VISIBLE']);
+        $hidden = $this->orderForBranch($otherBranch->id, ['number' => 'DASH-TAB-HIDDEN']);
+
+        $this->actingAs($user)->getJson('/api/dashboard/recent/orders')
+            ->assertOk()
+            ->assertJsonFragment(['number' => $visible->number])
+            ->assertJsonMissing(['number' => $hidden->number]);
+
+        $restricted = User::factory()->create(['active' => true, 'all_branches' => true]);
+        $role = Role::create(['name' => 'dashboard-orders-tabs-test', 'guard_name' => 'web']);
+        $role->givePermissionTo(['dashboard.view', 'orders.view']);
+        $restricted->assignRole($role);
+
+        $this->actingAs($restricted)->getJson('/api/dashboard/recent/cards')->assertForbidden();
+    }
+
     private function dashboardUser(array $branchIds): User
     {
         $user = User::factory()->create([

@@ -23,6 +23,11 @@ class StockMovement extends Model
         return $this->belongsTo(Warehouse::class);
     }
 
+    public function destinationWarehouse()
+    {
+        return $this->belongsTo(Warehouse::class, 'destination_warehouse_id');
+    }
+
     public function vehicle()
     {
         return $this->belongsTo(Vehicle::class);
