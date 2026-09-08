@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\MasterController;
 use App\Http\Controllers\Api\MediaController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\SearchController;
+use App\Services\DeletionService;
 use App\Http\Controllers\AuthController;
 use Illuminate\Support\Facades\Route;
 
@@ -21,6 +22,7 @@ Route::middleware(['auth', 'active'])->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/media/{media}', [MediaController::class, 'show'])->name('media.show');
     Route::delete('/media/{media}', [MediaController::class, 'destroy']);
+    Route::patch('/media/{media}', [MediaController::class, 'relabel']);
     Route::prefix('api')->group(function () {
         Route::get('me', fn () => ['user' => auth()->user()->only('id', 'name', 'email', 'all_branches'), 'permissions' => auth()->user()->getAllPermissions()->pluck('name')]);
         Route::get('lookups', [MasterController::class, 'lookups']);
@@ -38,6 +40,12 @@ Route::middleware(['auth', 'active'])->group(function () {
         Route::get('inventory/balances', [InventoryController::class, 'balances']);
         Route::get('inventory/movements', [InventoryController::class, 'movements']);
         Route::post('inventory/movements', [InventoryController::class, 'store']);
+        Route::delete('records/{kind}', function (\Illuminate\Http\Request $request, string $kind, DeletionService $service) {
+            $rules = ['ids' => 'required|array|min:1|max:100', 'ids.*' => 'integer|distinct'];
+            if ($kind === 'stock-balances') $rules['warehouse_id'] = 'required|integer|exists:warehouses,id';
+            $data = $request->validate($rules);
+            return response()->json($service->destroy($kind, $data['ids'], $data['warehouse_id'] ?? null));
+        });
         Route::get('cards', [CardController::class, 'index']);
         Route::post('cards', [CardController::class, 'store']);
         Route::get('cards/summary', [CardController::class, 'summary']);

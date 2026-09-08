@@ -117,6 +117,9 @@ class CardController extends Controller
 
     private function applyFilters($q, Request $r, bool $includeStatus = true): void
     {
+        if ($r->boolean('open')) {
+            $q->where('status', '!=', 'closed');
+        }
         if ($r->filled('status') && $includeStatus) {
             $q->where('status', $r->input('status'));
         }

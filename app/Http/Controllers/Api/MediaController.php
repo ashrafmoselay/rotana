@@ -18,7 +18,7 @@ class MediaController extends Controller
     {
         Access::allow('media.upload');
         Access::branch($order->branch_id);
-        $data = $r->validate(['collection' => ['required', Rule::in(['quote', 'photos_before', 'photos_after', 'attachments', 'invoice', 'proof'])], 'label' => ['nullable', Rule::in(array_keys(config('rotana.photo_labels')))], 'file' => 'required|file|max:10240|mimes:pdf,jpg,jpeg,png,webp,mp4']);
+        $data = $r->validate(['collection' => ['required', Rule::in(['quote', 'photos_before', 'photos_after', 'attachments', 'invoice', 'proof', 'vehicle_video'])], 'label' => ['nullable', Rule::in(array_keys(config('rotana.photo_labels')))], 'file' => 'required|file|max:10240|mimes:pdf,jpg,jpeg,png,webp,mp4']);
         $collection = $data['collection'];
 
         return DB::transaction(function () use ($r, $order, $data, $collection) {
@@ -28,6 +28,10 @@ class MediaController extends Controller
                 'invoice' => 'invoices.manage','proof' => 'payments.create',default => 'orders.update'
             };
             Access::allow($permission);
+            if ($collection === 'vehicle_video') {
+                abort_unless(in_array($order->status, [S::Draft, S::Matching, S::Ready]), 422, 'الفيديو متاح في المسودة وأثناء الاستلام والمطابقة.');
+                abort_unless($r->file('file')->getMimeType() === 'video/mp4', 422, 'ارفع فيديو بصيغة MP4.');
+            }
             if (in_array($collection, ['quote', 'photos_before', 'attachments'])) {
                 abort_unless($order->status === S::Draft, 422, 'لا يمكن تغيير مرفقات الطلب بعد الإرسال.');
             }
@@ -63,6 +67,35 @@ class MediaController extends Controller
         return response()->file($media->getPath(), ['Content-Type' => $media->mime_type, 'X-Content-Type-Options' => 'nosniff', 'Cache-Control' => 'private, no-store']);
     }
 
+    public function relabel(Request $request, Media $media)
+    {
+        Access::allow('orders.update');
+        $order = $media->model;
+        abort_unless($order instanceof PurchaseOrder, 404);
+        Access::branch($order->branch_id);
+        $data = $request->validate(['label' => ['required', Rule::in(array_keys(config('rotana.photo_labels')))]]);
+        DB::transaction(function () use ($order, $media, $data) {
+            $order = PurchaseOrder::lockForUpdate()->findOrFail($order->id);
+            abort_unless(in_array($media->collection_name, ['photos_before', 'photos_after']), 422, 'يمكن تعيين زاوية لصور السيارة فقط.');
+            $this->allowPhotoChange($order, $media);
+            $media->refresh();
+            $before = $media->getCustomProperty('label');
+            $occupied = $order->getMedia($media->collection_name)->contains(fn ($item) => $item->id !== $media->id && $item->getCustomProperty('label') === $data['label']);
+            abort_if($occupied && $before !== $data['label'], 422, 'الزاوية المختارة تحتوي على صورة. اختر زاوية فارغة أو أعد تعيين الصورة الموجودة أولًا.');
+            $media->setCustomProperty('label', $data['label'])->save();
+            Audit::record('media.relabeled', $order, ['branch_id' => $order->branch_id, 'media_id' => $media->id, 'from' => $before, 'to' => $data['label']]);
+        });
+        return response()->noContent();
+    }
+
+    private function allowPhotoChange(PurchaseOrder $order, Media $media): void
+    {
+        $allowed = $media->collection_name === 'photos_after'
+            ? in_array($order->status, [S::Matching, S::Ready])
+            : $order->status === S::Draft;
+        abort_unless($allowed, 422, 'لا يمكن تعديل هذا المرفق في المرحلة الحالية.');
+    }
+
     public function destroy(Media $media)
     {
         Access::allow('orders.update');
@@ -72,7 +105,7 @@ class MediaController extends Controller
         DB::transaction(function () use ($order, $media) {
             $order = PurchaseOrder::lockForUpdate()->findOrFail($order->id);
             Access::branch($order->branch_id);
-            abort_unless($order->status === S::Draft, 422, 'المرفقات ثابتة بعد الإرسال.');
+            $this->allowPhotoChange($order, $media);
             $media->delete();
             Audit::record('media.deleted', $order, ['branch_id' => $order->branch_id, 'media_id' => $media->id]);
         });

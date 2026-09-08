@@ -23,3 +23,5 @@
     .service-card:hover,.service-card .service-actions a:hover,.service-card .service-actions a:active,.service-card .service-orders:hover::after,.service-card .service-add:hover i{transform:none}
     .service-card .service-actions a::before{display:none}
 }
+
+.dashboard-followup-link{display:block;padding:12px;border:1px solid #e5edf7;border-radius:12px;background:#f8fbff;color:#314361;font-size:13px;transition:transform .18s,background .18s,border-color .18s,box-shadow .18s}.dashboard-followup-link b{display:block;margin-top:3px;font-size:20px;color:var(--blue)}.dashboard-followup-link small{display:flex;align-items:center;gap:6px;margin-top:8px;color:#1675a5;font-weight:700}.dashboard-followup-link:hover,.dashboard-followup-link:focus-visible{color:#183a61;border-color:#afd5ef;background:#f1f9ff;transform:translateY(-2px);box-shadow:0 8px 18px #173d6812}.inventory-filter-notice{display:flex;align-items:center;gap:8px;margin:0 0 16px;padding:11px 13px;border:1px solid #f3dda1;border-radius:10px;background:#fff7df;color:#825900;font-size:13px;font-weight:700}

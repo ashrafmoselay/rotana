@@ -23,6 +23,9 @@ class InventoryController extends Controller
         $w = Warehouse::findOrFail($r->integer('warehouse_id'));
         Access::branch($w->branch_id);
         $q = Item::query()->where('track_stock', true)->with(['balances' => fn ($q) => $q->where('warehouse_id', $w->id)]);
+        if ($r->boolean('low_stock')) {
+            $q->whereHas('balances', fn ($q) => $q->where('warehouse_id', $w->id)->whereColumn('stock_balances.quantity_milli', '<', 'items.minimum_milli'));
+        }
 
         return DataTables::eloquent($q)
             ->filterColumn('quantity_milli', function ($q, $keyword) use ($w) {

@@ -560,6 +560,54 @@ class RotanaTest extends TestCase
         $this->postJson('/api/orders/'.$o->id.'/actions/submit')->assertOk();
     }
 
+    public function test_saved_photo_can_be_reassigned_and_deleted_only_in_editable_stage(): void
+    {
+        $order = PurchaseOrder::where('status', 'draft')->where('category', 'stock')->firstOrFail();
+        $id = $this->postJson('/api/orders/'.$order->id.'/media', ['collection' => 'photos_before', 'label' => 'front', 'file' => UploadedFile::fake()->image('front.jpg')])->assertCreated()->json('id');
+        $this->patchJson('/media/'.$id, ['label' => 'back'])->assertNoContent();
+        $this->assertSame('back', $order->fresh()->getMedia('photos_before')->firstWhere('id', $id)->getCustomProperty('label'));
+        $this->patchJson('/media/'.$id, ['label' => 'invalid'])->assertUnprocessable();
+        $order->update(['status' => 'accountant']);
+        $this->patchJson('/media/'.$id, ['label' => 'front'])->assertUnprocessable();
+        $this->deleteJson('/media/'.$id)->assertUnprocessable();
+        $order->update(['status' => 'draft']);
+        $this->deleteJson('/media/'.$id)->assertNoContent();
+        $this->assertDatabaseMissing('media', ['id' => $id]);
+    }
+
+    public function test_vehicle_video_upload_obeys_type_and_stage_constraints(): void
+    {
+        $order = PurchaseOrder::where('status', 'draft')->firstOrFail();
+        $url = '/api/orders/'.$order->id.'/media';
+        $this->postJson($url, ['collection' => 'vehicle_video', 'file' => UploadedFile::fake()->image('not-video.jpg')])->assertUnprocessable();
+        $this->postJson($url, ['collection' => 'vehicle_video', 'file' => UploadedFile::fake()->create('car.mp4', 100, 'video/mp4')])->assertCreated();
+        $order->update(['status' => 'accountant']);
+        $this->postJson($url, ['collection' => 'vehicle_video', 'file' => UploadedFile::fake()->create('car.mp4', 100, 'video/mp4')])->assertUnprocessable();
+    }
+
+    public function test_submission_requires_quote_number_and_pdf_quote_document(): void
+    {
+        $o = PurchaseOrder::where('category', 'stock')->where('status', 'draft')->firstOrFail();
+        $o->clearMediaCollection('quote');
+        $o->update(['quote_number' => null]);
+
+        $this->postJson('/api/orders/'.$o->id.'/actions/submit')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('order');
+
+        $o->update(['quote_number' => 'QT-TEST-'.now()->format('YmdHis')]);
+        $this->postJson('/api/orders/'.$o->id.'/actions/submit')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('order');
+
+        $this->postJson('/api/orders/'.$o->id.'/media', [
+            'collection' => 'quote',
+            'file' => UploadedFile::fake()->create('quote.pdf', 20, 'application/pdf'),
+        ])->assertCreated();
+
+        $this->postJson('/api/orders/'.$o->id.'/actions/submit')->assertOk();
+    }
+
     public function test_user_creation_roles_and_excel_success(): void
     {
         $this->postJson('/api/admin/users', ['name' => 'New employee', 'email' => 'new@example.test', 'password' => 'Secure-Test-2026', 'active' => true, 'all_branches' => false, 'roles' => ['employee'], 'branch_ids' => [1]])->assertCreated();

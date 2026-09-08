@@ -162,7 +162,20 @@ function head(title, sub = '', actions = '') {
 }
 
 function button(label, action, icon = 'plus', extra = '') {
-    return `<button type="button" class="btn btn-primary" data-action="${action}" ${extra}><i class="fa-solid fa-${icon}"></i>${label}</button>`;
+    const semanticClass = /edit|update/.test(action) ? ' action-edit' : ' action-add';
+    return `<button type="button" class="btn btn-primary${semanticClass}" data-action="${action}" title="${esc(label)}" ${extra}><i class="fa-solid fa-${icon}"></i>${label}</button>`;
+}
+
+function applyActionTitles(root = document) {
+    $(root).find('button, a.btn').each(function () {
+        const label = this.getAttribute('aria-label') || $(this).text().replace(/\s+/g, ' ').trim();
+        if (!this.hasAttribute('title') && label) this.setAttribute('title', label);
+        if (this.classList.contains('stage-summary-card')) return;
+        if (/حذف/.test(label)) this.classList.add('action-delete');
+        else if (/تعديل/.test(label)) this.classList.add('action-edit');
+        else if (/تفاصيل|عرض/.test(label)) this.classList.add('action-details');
+        else if (/إضافة|جديد|إنشاء/.test(label)) this.classList.add('action-add');
+    });
 }
 
 function openModal(title, body, save) {
@@ -175,6 +188,7 @@ function openModal(title, body, save) {
 }
 
 function enhance(root = document) {
+    applyActionTitles(root);
     $(root).find('.searchable').each(function () {
         const selectNode = $(this);
         if (selectNode.hasClass('select2-hidden-accessible')) {
@@ -211,7 +225,36 @@ function grid(url, columns, options = {}) {
             render: column.render || $.fn.dataTable.render.text(),
             ...column,
         })),
+        drawCallback: () => applyActionTitles('#records'),
     });
+}
+
+const selectColumn = () => ({ data: 'id', title: '<input type="checkbox" class="select-all" aria-label="تحديد الكل">', orderable: false, searchable: false, className: 'row-selector', render: id => `<input type="checkbox" class="row-select" value="${Number(id)}" aria-label="تحديد السجل">` });
+
+function enableBulkDelete(kind, permissionName, extra = {}) {
+    if (!can(permissionName)) return;
+    $('#grid-area').before('<div class="action-bar bulk-delete-bar"><button type="button" class="btn btn-light text-danger bulk-delete" disabled><i class="fa-solid fa-trash"></i>حذف المحدد</button><span class="subtext bulk-selection-count">لم يتم تحديد سجلات.</span></div>');
+    const container = $('#content');
+    const selected = () => $('#records .row-select:checked').map((_, node) => Number(node.value)).get();
+    const update = () => {
+        const count = selected().length;
+        $('.bulk-delete').prop('disabled', !count);
+        $('.bulk-selection-count').text(count ? `تم تحديد ${count} سجل.` : 'لم يتم تحديد سجلات.');
+        $('#records .select-all').prop('checked', $('.row-select').length > 0 && count === $('.row-select').length);
+    };
+    // The action bar is a sibling of #grid-area, so bind from the stable page container.
+    container.off('change.bulkDelete', '.select-all').on('change.bulkDelete', '.select-all', function () { $('#records .row-select').prop('checked', this.checked); update(); })
+        .off('change.bulkDelete', '.row-select').on('change.bulkDelete', '.row-select', update)
+        .off('click.bulkDelete', '.bulk-delete').on('click.bulkDelete', '.bulk-delete', async () => {
+            const ids = selected();
+            const result = await Swal.fire({ title: `حذف ${ids.length} سجل؟`, text: 'لا يمكن التراجع عن الحذف. سيتحقق النظام من العلاقات والأرصدة قبل التنفيذ.', icon: 'warning', showCancelButton: true, confirmButtonText: 'حذف', cancelButtonText: 'إلغاء', reverseButtons: true });
+            if (!result.isConfirmed) return;
+            await api('records/' + kind, 'DELETE', { ids, ...extra });
+            toastr.success('تم حذف السجلات المحددة.');
+            table.ajax.reload();
+            await refreshLookups();
+        });
+    $('#records').on('draw.dt', update);
 }
 
 function col(data, title, extra = {}) {
@@ -485,7 +528,8 @@ async function route() {
     }
 
     const [hash, queryString = ''] = (location.hash.slice(1) || 'dashboard').split('?');
-    const requestedCategory = new URLSearchParams(queryString).get('category');
+    const routeParams = new URLSearchParams(queryString);
+    const requestedCategory = routeParams.get('category');
     const category = Object.hasOwn(lookup.categories, requestedCategory) ? requestedCategory : '';
     $('.nav-item').removeClass('active').filter(`[href="#${hash.split('/')[0]}"]`).addClass('active');
     $('#sidebar').removeClass('open');
@@ -506,8 +550,8 @@ async function route() {
             case 'dashboard': return await dashboard();
             case 'orders': return orders(false, category);
             case 'reports': return orders(true);
-            case 'inventory': return inventory();
-            case 'cards': return cards();
+            case 'inventory': return inventory(routeParams);
+            case 'cards': return cards(routeParams);
             case 'users': return users();
             case 'roles': return await roles();
             case 'activity': return activity();
@@ -556,8 +600,8 @@ async function dashboard() {
             <section class="panel dashboard-followup-panel">
                 <h2 class="section-title"><span><i class="fa-solid fa-bolt"></i> ملخص المتابعة</span><small>يتطلب انتباهك</small></h2>
                 <div class="dashboard-followup-summary">
-                    <p>كروت الصيانة المفتوحة: <b>${data.cards}</b></p>
-                    <p>أصناف أقل من حد إعادة الطلب: <b>${data.low_stock}</b></p>
+                    ${can('cards.view') ? `<a class="dashboard-followup-link" href="#cards?status=open" aria-label="عرض كروت الصيانة المفتوحة">كروت الصيانة المفتوحة: <b>${data.cards}</b><small>عرض الكروت <i class="fa-solid fa-arrow-left" aria-hidden="true"></i></small></a>` : `<p>كروت الصيانة المفتوحة: <b>${data.cards}</b></p>`}
+                    ${can('inventory.view') ? `<a class="dashboard-followup-link" href="#inventory?low_stock=1" aria-label="عرض الأصناف الأقل من حد إعادة الطلب">أصناف أقل من حد إعادة الطلب: <b>${data.low_stock}</b><small>عرض الأصناف <i class="fa-solid fa-arrow-left" aria-hidden="true"></i></small></a>` : `<p>أصناف أقل من حد إعادة الطلب: <b>${data.low_stock}</b></p>`}
                 </div>
                 <div class="dashboard-recent-list">
                     ${(data.recent || []).length ? data.recent.map(order => `<a class="quick-link" href="#order/${order.id}"><span><i class="fa-solid fa-file-lines"></i> ${bdi(order.number)}</span><small>${esc(statusLabel(order.status))}</small></a>`).join('') : '<p class="subtext">لا توجد طلبات حديثة.</p>'}
@@ -616,6 +660,7 @@ function orders(report = false, category = '') {
     enhance();
     $('#export-link').attr('href', '/api/excel/export/orders?' + new URLSearchParams({ category }));
     grid('orders?' + new URLSearchParams({ category }), [
+        selectColumn(),
         col('number', 'رقم الطلب', { className: 'po-code', render: value => bdi(value) }),
         col('date', 'التاريخ', { className: 'po-date', render: value => bdi(value) }),
         col('branch_name', 'الفرع'),
@@ -624,9 +669,10 @@ function orders(report = false, category = '') {
         col('total', 'الإجمالي', { name: 'total', className: 'po-money', render: value => bdi(value) }),
         col('status_label', 'الحالة', { name: 'status_label', className: 'po-status-cell', render: (value, type, row) => type === 'display' ? `<span class="badge po-status po-status-${esc(row.status)}">${esc(value)}</span>` : value }),
         { data: 'id', title: 'التفاصيل', className: 'po-actions', orderable: false, searchable: false, render: (id, type, row) => `<a class="btn btn-light po-action" href="#order/${Number(id)}" title="عرض تفاصيل ${esc(row.number)}" aria-label="عرض تفاصيل الطلب ${esc(row.number)}"><i class="fa-solid fa-eye"></i><span>عرض</span></a>` },
-    ]);
+    ], { order: [[1, 'desc']] });
     $('#grid-area .table-responsive').addClass('po-table-wrap');
     $('#records').addClass('po-table').attr('aria-label', report ? 'جدول تقارير الطلبات' : 'جدول طلبات الشراء');
+    if (!report) enableBulkDelete('orders', 'orders.delete');
 
     $('#filters').on('submit', function (event) {
         event.preventDefault();
@@ -765,7 +811,7 @@ function orderForm(order = null, category = '') {
                     ${poSelect('category', 'نوع الطلب', Object.entries(lookup.categories).map(([id, name]) => ({ id, name })), order?.category || category || 'maintenance')}
                     ${poField('date', 'التاريخ', order?.date || today(), 'date')}
                     ${poSelect('priority', 'الأولوية', [{ id: 'normal', name: 'عادي' }, { id: 'urgent', name: 'عاجل' }, { id: 'critical', name: 'عاجل جدًا' }], order?.priority || 'normal')}
-                    ${poField('quote_number', 'رقم عرض السعر', order?.quote_number || '', 'text', false)}
+                    ${poField('quote_number', 'رقم عرض السعر (مطلوب قبل الإرسال للمراجعة)', order?.quote_number || '', 'text', false, 'maxlength="100"')}
                 </div>
             </section>
             <section class="panel po-form-panel">
@@ -848,7 +894,14 @@ function orderForm(order = null, category = '') {
     });
 }
 
+function ensureOrderDetailStyle() {
+    if (!document.getElementById('vehicle-upload-css')) $('<link id="vehicle-upload-css" rel="stylesheet" href="/assets/vehicle-upload.css">').appendTo('head');
+    if (document.getElementById('order-detail-style')) return;
+    $('<style id="order-detail-style">.order-overview{display:flex;gap:20px;align-items:center;border-right:4px solid var(--blue);padding:18px 22px}.order-metadata{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:17px;flex:1}.order-metadata small,.order-status-pill small{display:block;color:var(--muted);font-weight:700;font-size:12px}.order-metadata strong{display:block;color:#253a5e;font-size:15px;line-height:1.55;overflow-wrap:anywhere}.order-status-pill{background:#e8f8f4;border:1px solid #bce6dc;border-radius:12px;padding:10px 16px;min-width:130px}.order-status-pill b{color:#08785d}.order-indicators{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));background:#fff;border:1px solid var(--line);border-radius:14px;overflow:hidden;margin:0 0 18px}.order-indicators>div{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:14px 16px;border-left:1px solid var(--line)}.order-indicators>div:last-child{border-left:0}.order-indicators i{font-size:22px;color:#1557a5}.order-indicators span{font-weight:700;color:#344968}.order-indicators b{font-size:21px;color:#162e51}.order-detail-layout{display:grid;grid-template-columns:minmax(250px,.78fr) minmax(420px,1.35fr) minmax(300px,1fr);gap:18px;align-items:start}.order-detail-layout .panel{margin:0}.order-approval-column{padding:0;overflow:hidden}.order-approval-column .order-timeline{margin:0;border:0;border-radius:0;box-shadow:none}.order-main-column{display:grid;gap:18px}.quote-file{display:flex;gap:12px;align-items:center;padding:14px;border:1px solid #dce6f3;background:#f8fbff;border-radius:12px;color:var(--ink)}.quote-file>.fa-file-pdf{font-size:30px;color:#db3247}.quote-file span{display:grid;gap:2px;flex:1;min-width:0}.quote-file b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.quote-file small{color:var(--muted)}.vehicle-photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.order-photo{display:block;background:#f6f8fb;border:1px solid #e0e7f1;border-radius:10px;overflow:hidden;color:#32496b;font-size:12px;font-weight:700;text-align:center}.order-photo img{display:block;width:100%;height:112px;object-fit:cover}.order-photo span{display:block;padding:5px}.order-photos-card .section-title>b{font-size:14px;color:#1557a5;background:#edf5ff;padding:4px 9px;border-radius:999px}@media(max-width:1350px){.order-detail-layout{grid-template-columns:minmax(280px,.9fr) minmax(400px,1.35fr)}.order-photos-card{grid-column:1/-1}.vehicle-photo-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.order-photo img{height:95px}}@media(max-width:900px){.order-metadata{grid-template-columns:repeat(2,minmax(0,1fr))}.order-detail-layout{grid-template-columns:1fr}.order-photos-card{grid-column:auto}.vehicle-photo-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.order-indicators{grid-template-columns:repeat(3,minmax(0,1fr)}}@media(max-width:600px){.order-overview{align-items:flex-start;flex-direction:column}.order-metadata,.order-indicators{grid-template-columns:1fr}.order-indicators>div{border-left:0;border-bottom:1px solid var(--line)}.order-indicators>div:last-child{border-bottom:0}.vehicle-photo-grid{grid-template-columns:repeat(2,minmax(0,1fr)}}</style>').appendTo('head');
+}
+
 async function detail(id) {
+    ensureOrderDetailStyle();
     const order = await api('orders/' + id);
     currentOrder = order;
     let actions = '';
@@ -871,17 +924,24 @@ async function detail(id) {
     if (order.status === 'ready' && can('payments.create')) actions += button('تسجيل الحوالة', 'payment', 'money-bill-transfer');
     if (order.status === 'paid' && can('orders.close')) actions += button('إغلاق الطلب', 'transition', 'lock', 'data-next="close"');
 
+    const mediaBy = collection => order.media.filter(media => media.collection === collection);
+    const vehiclePhotos = mediaBy('photos_before').reverse();
+    const quote = mediaBy('quote')[0];
+    const metadata = [
+        ['رقم الطلب', bdi(order.number)], ['نوع الطلب', esc(lookup.categories[order.category])], ['المنطقة', esc(order.region_name || '—')], ['المورد', esc(order.supplier_name)],
+        ['مركز التكلفة', esc(lookup.cost_centers.find(row => String(row.id) === String(order.cost_center_id))?.name || '—')], ['تاريخ الطلب', bdi(order.date)], ['رقم عرض السعر', bdi(order.quote_number || '—')], ['المبلغ الإجمالي', money(order.total_minor)],
+    ];
+    const indicators = [['صور السيارة', vehiclePhotos.length, 'car-side'], ['المرفقات', order.media.length, 'paperclip'], ['الاستلام', order.receipt ? 1 : 0, 'cart-flatbed'], ['فاتورة المورد', order.invoice ? 1 : 0, 'file-invoice'], ['الحوالة', order.payment ? 1 : 0, 'building-columns']];
+    const renderPhoto = media => `<div class="vehicle-photo-card"><a class="order-photo" href="${esc(media.url)}" data-gallery-id="${media.id}"><img src="${esc(media.url)}" alt="${esc(lookup.photo_labels[media.label] || 'صورة السيارة')}"><span>${esc(lookup.photo_labels[media.label] || 'صورة')}</span></a>${can('orders.update') && (media.collection === 'photos_after' ? ['matching', 'ready'].includes(order.status) : order.status === 'draft') ? `<div class="vehicle-photo-tools"><button type="button" class="btn btn-light" data-action="relabel-photo" data-id="${media.id}" title="تغيير زاوية الصورة"><i class="fa-solid fa-arrows-rotate"></i>تعيين الزاوية</button><button type="button" class="btn btn-light text-danger" data-action="delete-media" data-id="${media.id}" title="حذف الصورة"><i class="fa-solid fa-trash"></i>حذف</button></div>` : ''}</div>`;
+    const detailActions = can('media.upload') && !['paid', 'closed', 'rejected'].includes(order.status) ? button('رفع ملف أو تصوير', 'upload', 'camera') : '';
+
     $('#content').html(
         head(order.number, `${lookup.categories[order.category]} · ${order.branch_name} · ${order.date}`, actions) +
         workflowSteps(order.status) +
-        `<div class="stats">${[
-            [order.supplier_name, 'المورد'],
-            [order.vehicle_plate || '—', 'السيارة'],
-            [money(order.total_minor), 'إجمالي الطلب'],
-            [statusLabel(order.status), 'الحالة'],
-        ].map(stat => `<div class="stat"><div><span>${stat[1]}</span><strong style="font-size:18px">${stat[1] === 'السيارة' ? bdi(stat[0]) : esc(stat[0])}</strong></div></div>`).join('')}</div>
-        <section class="panel mt-3">
-            <h2 class="section-title">البنود والمطابقة</h2>
+        `<section class="order-overview panel"><div class="order-metadata">${metadata.map(([label, value]) => `<div><small>${label}</small><strong>${value}</strong></div>`).join('')}</div><div class="order-status-pill"><small>الحالة</small><b>${esc(statusLabel(order.status))}</b></div></section>
+        <section class="order-indicators">${indicators.map(([label, count, icon]) => `<div><i class="fa-solid fa-${icon}"></i><span>${label}</span><b>${Number(count).toLocaleString('ar-SA')}</b></div>`).join('')}</section>
+        <section class="order-detail-layout"><aside class="panel order-approval-column">${orderTimeline(order)}</aside><div class="order-main-column"><section class="panel order-quote-card"><h2 class="section-title"><span><i class="fa-solid fa-file-lines"></i> عرض السعر</span>${detailActions}</h2>${quote ? `<a class="quote-file" href="${esc(quote.url)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-pdf"></i><span><b>${bdi(quote.name)}</b><small>رقم العرض: ${bdi(order.quote_number)}</small></span><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '<div class="empty-inline"><i class="fa-solid fa-file-circle-exclamation"></i> لم يُرفع عرض سعر بعد.</div>'}</section><section class="panel order-lines-card">
+            <h2 class="section-title">بنود الطلب والمطابقة</h2>
             <div class="table-responsive">
                 <table class="table">
                     <thead><tr><th>الصنف</th><th>المطلوب</th><th>المستلم</th><th>بالفاتورة</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead>
@@ -897,13 +957,7 @@ async function detail(id) {
             ${order.invoice ? `<p>الفاتورة: ${bdi(order.invoice.number)} بقيمة ${money(order.invoice.total_minor)}</p>` : ''}
             ${order.payment ? `<p class="text-success">الحوالة: ${bdi(order.payment.reference)} بقيمة ${money(order.payment.amount_minor)}</p>` : ''}
             ${order.notes ? `<p>${esc(order.notes)}</p>` : ''}
-        </section>
-        <section class="panel">
-            <h2 class="section-title">المرفقات وصور السيارة ${can('media.upload') && !['paid', 'closed', 'rejected'].includes(order.status) ? button('رفع ملف أو تصوير', 'upload', 'camera') : ''}</h2>
-            <div class="document-grid">${order.media.map(media => `<div class="document-card">${media.mime.startsWith('image/') ? `<img class="photo-preview" src="${esc(media.url)}" alt="${esc(media.label)}">` : '<i class="fa-solid fa-file-pdf text-danger fs-2"></i>'}<p class="small my-2">${esc(lookup.photo_labels[media.label] || media.collection)}<br><a href="${esc(media.url)}" target="_blank" rel="noopener">${bdi(media.name)}</a></p>${order.status === 'draft' && can('orders.update') ? `<button class="btn btn-light" data-action="delete-media" data-id="${media.id}">حذف المرفق</button>` : ''}</div>`).join('') || '<p class="subtext">لا توجد مرفقات حتى الآن.</p>'}</div>
-            ${order.vehicle_id ? `<p class="subtext mt-3">صور ما قبل الإصلاح المطلوبة: ${Object.values(lookup.photo_labels).join('، ')}.</p>` : ''}
-        </section>
-        ${orderTimeline(order)}`
+        </section></div><section class="panel order-photos-card"><h2 class="section-title"><span><i class="fa-solid fa-camera"></i> صور السيارة</span><b>${new Set(vehiclePhotos.map(m => m.label)).size}/9</b></h2>${can('media.upload') && can('orders.update') && ['draft', 'matching', 'ready'].includes(order.status) ? button('إضافة الصور والفيديو', 'vehicle-upload', 'images') : ''}<div class="vehicle-photo-grid">${Object.entries(lookup.photo_labels).map(([label, name]) => { const media = vehiclePhotos.find(m => m.label === label); return media ? renderPhoto(media) : `<div class="vehicle-empty"><i class="fa-solid fa-${photoIcon(label)}"></i><b>${esc(name)}</b><small>لم تُضف صورة</small></div>`; }).join('')}</div>${order.media.filter(m => m.mime.startsWith('video/')).map(m => `<video class="vehicle-video" controls preload="metadata" src="${esc(m.url)}"></video>`).join('')}</section></section>`
     );
 
     $('#content').off('click.orderTimeline', '.order-timeline-toggle').on('click.orderTimeline', '.order-timeline-toggle', function () {
@@ -913,6 +967,18 @@ async function detail(id) {
         button.closest('.order-timeline').toggleClass('is-expanded', !expanded);
         button.find('span').text(expanded ? `عرض ${button.closest('.order-timeline').find('.is-extra').length} أحداث سابقة` : 'إخفاء الأحداث السابقة');
     });
+    const afterPhotos = mediaBy('photos_after');
+    const seenAngles = new Set();
+    const extraPhotos = vehiclePhotos.filter(photo => { if (seenAngles.has(photo.label)) return true; seenAngles.add(photo.label); return false; });
+    if (extraPhotos.length) $('.order-photos-card').append(`<h3 class="section-title mt-3">صور إضافية للزوايا</h3><div class="vehicle-photo-grid">${extraPhotos.map(renderPhoto).join('')}</div>`);
+    if (afterPhotos.length) $('.order-photos-card').append(`<h3 class="section-title mt-3">صور بعد الإصلاح</h3><div class="vehicle-photo-grid">${afterPhotos.map(renderPhoto).join('')}</div>`);
+    $('#content').off('click.vehicleGallery', '[data-gallery-id]').on('click.vehicleGallery', '[data-gallery-id]', function (event) {
+        event.preventDefault();
+        vehicleGallery(order.media.filter(m => m.mime.startsWith('image/')), Number(this.dataset.galleryId));
+    });
+    $('#content .order-photo img').on('error', function () {
+        $(this).replaceWith('<i class="fa-solid fa-image vehicle-image-unavailable" title="تعذر تحميل الصورة"></i>');
+    }).each(function () { if (this.complete && !this.naturalWidth) $(this).trigger('error'); });
 }
 
 function masterFields(kind, record = {}) {
@@ -942,7 +1008,7 @@ function masterEditor(kind, record = {}) {
 }
 
 function masterColumns(kind) {
-    const base = [col('id', 'الرقم', { className: 'master-code', render: value => bdi(value) })];
+    const base = [selectColumn(), col('id', 'الرقم', { className: 'master-code', render: value => bdi(value) })];
     const columns = {
         vehicles: [
             ...base,
@@ -984,7 +1050,7 @@ function masters(kind, focusId = null) {
     const actions = (focused ? `<a href="#master/${esc(kind)}" class="btn btn-light"><i class="fa-solid fa-list"></i>عرض كل السجلات</a>` : '') + (can(permission(kind)) ? button('إضافة سجل', 'master-add', 'plus', `data-kind="${kind}"`) : '') + (!focused && ['items', 'vehicles', 'suppliers'].includes(kind) ? excelButtons(kind) : '');
     $('#content').html(head(title, description, actions) + `<div class="panel master-result-panel${focused ? ' is-focused' : ''}" id="grid-area"></div>`);
 
-    grid('masters/' + kind + (focused ? '?id=' + encodeURIComponent(focusId) : ''), masterColumns(kind));
+    grid('masters/' + kind + (focused ? '?id=' + encodeURIComponent(focusId) : ''), masterColumns(kind), { order: [[1, 'desc']] });
     $('#records')
         .addClass('master-table' + (kind === 'vehicles' ? ' vehicle-master-table' : ''))
         .closest('.table-responsive')
@@ -992,17 +1058,21 @@ function masters(kind, focusId = null) {
     $('#records').on('click', '.row-edit', function () {
         masterEditor(kind, table.row($(this).closest('tr')).data());
     });
+    if (!focused) enableBulkDelete(kind, 'masters.delete');
 }
 
-function inventoryTable(showMovements) {
+function inventoryTable(showMovements, lowStock = false) {
     let warehouseId = $('[name=warehouse_id]').val();
     if (!showMovements && !warehouseId) {
         warehouseId = lookup.warehouses[0]?.id;
         $('[name=warehouse_id]').val(warehouseId).trigger('change');
     }
 
-    grid('inventory/' + (showMovements ? 'movements' : 'balances') + '?warehouse_id=' + (warehouseId || ''), showMovements
+    const query = new URLSearchParams({ warehouse_id: warehouseId || '' });
+    if (!showMovements && lowStock) query.set('low_stock', '1');
+    grid('inventory/' + (showMovements ? 'movements' : 'balances') + '?' + query.toString(), showMovements
         ? [
+            selectColumn(),
             col('number', 'رقم الحركة', { className: 'inventory-code', render: value => bdi(value) }),
             col('date', 'التاريخ', { className: 'inventory-date', render: value => bdi(value) }),
             col('type', 'نوع الحركة', { className: 'inventory-state-cell', render: value => movementBadge(value) }),
@@ -1012,6 +1082,7 @@ function inventoryTable(showMovements) {
             col('notes', 'الملاحظات', { className: 'inventory-notes' }),
         ]
         : [
+            selectColumn(),
             col('sku', 'كود الصنف', { className: 'inventory-code', render: value => bdi(value) }),
             col('name', 'الصنف'),
             { data: 'quantity_milli', title: 'الرصيد الحالي', className: 'inventory-number', render: value => bdi(quantityText(value)) },
@@ -1023,6 +1094,7 @@ function inventoryTable(showMovements) {
         .addClass(showMovements ? 'inventory-table inventory-movements-table' : 'inventory-table inventory-balances-table')
         .closest('.table-responsive')
         .addClass('inventory-table-wrap');
+    enableBulkDelete(showMovements ? 'movements' : 'stock-balances', 'inventory.delete', showMovements ? {} : { warehouse_id: Number(warehouseId) });
 }
 
 function movement(type) {
@@ -1034,10 +1106,12 @@ function movement(type) {
     });
 }
 
-function inventory() {
-    $('#content').html(head('المخزون والحركات', 'عرض الأرصدة الفعلية وتسجيل الصرف والتحويل والمرتجعات وتسويات الجرد.', Object.entries(movementTypes).filter(([key]) => can('inventory.' + key)).map(([key, label]) => button(label, 'movement', 'boxes-stacked', `data-type="${key}"`)).join('')) + `<div class="panel"><div class="form-grid">${select('warehouse_id', 'المخزن', lookup.warehouses)}</div><div class="action-bar">${button('عرض الأرصدة', 'balances', 'cubes')}${button('عرض سجل الحركات', 'movements', 'list')}</div><div id="grid-area"></div></div>`);
+function inventory(routeParams = new URLSearchParams()) {
+    const lowStock = routeParams.get('low_stock') === '1';
+    const subtitle = lowStock ? 'عرض الأصناف التي تقل أرصدتها عن حد إعادة الطلب في المخزن المحدد.' : 'عرض الأرصدة الفعلية وتسجيل الصرف والتحويل والمرتجعات وتسويات الجرد.';
+    $('#content').html(head('المخزون والحركات', subtitle, Object.entries(movementTypes).filter(([key]) => can('inventory.' + key)).map(([key, label]) => button(label, 'movement', 'boxes-stacked', `data-type="${key}"`)).join('')) + `<div class="panel">${lowStock ? '<div class="inventory-filter-notice"><i class="fa-solid fa-triangle-exclamation"></i> يتم عرض الأصناف الأقل من حد إعادة الطلب.</div>' : ''}<div class="form-grid">${select('warehouse_id', 'المخزن', lookup.warehouses)}</div><div class="action-bar">${button('عرض الأرصدة', 'balances', 'cubes')}${button('عرض سجل الحركات', 'movements', 'list')}</div><div id="grid-area"></div></div>`);
     enhance();
-    inventoryTable(false);
+    inventoryTable(false, lowStock);
 }
 
 function cardFilterQuery(includeStatus = true) {
@@ -1045,8 +1119,12 @@ function cardFilterQuery(includeStatus = true) {
         vehicle_id: $('#card-vehicle-filter').val(),
         date_from: $('#card-date-from').val(),
         date_to: $('#card-date-to').val(),
-        status: includeStatus ? $('#card-stage-filter').val() : '',
+        status: includeStatus ? $('#card-stage-filter').val() : ($('#card-stage-filter').val() === 'open' ? 'open' : ''),
     };
+    if (values.status === 'open') {
+        delete values.status;
+        values.open = 1;
+    }
     return $.param(Object.fromEntries(Object.entries(values).filter(([, value]) => value)));
 }
 
@@ -1054,7 +1132,8 @@ async function refreshCardSummary() {
     const data = await api('cards/summary?' + cardFilterQuery(false));
     Object.entries(cardStatuses).forEach(([status, label]) => {
         const count = data.counts?.[status] || 0;
-        $(`#stage-summary-${status}`).html(`<span>${esc(label)}</span><strong>${count.toLocaleString('ar-SA')}</strong><small>كارت صيانة</small>`);
+        const icons = { pending: 'folder-open', waiting_parts: 'gears', in_progress: 'screwdriver-wrench', completed: 'circle-check', closed: 'lock' };
+        $(`#stage-summary-${status}`).html(`<i class="fa-solid fa-${icons[status]}" aria-hidden="true"></i><span>${esc(label)}</span><strong>${count.toLocaleString('ar-SA')}</strong><small>كارت صيانة</small>`);
     });
 }
 
@@ -1071,11 +1150,13 @@ function cardEditor(row) {
     }));
 }
 
-function cards() {
-    const stageFilters = `<option value="">كل المراحل</option>${Object.entries(cardStatuses).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}`;
+function cards(routeParams = new URLSearchParams()) {
+    const initialStatus = routeParams.get('status') === 'open' ? 'open' : '';
+    const stageFilters = `<option value="">كل المراحل</option><option value="open">الكروت المفتوحة</option>${Object.entries(cardStatuses).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}`;
     const stageSummary = Object.entries(cardStatuses).map(([status]) => `<button type="button" class="stage-summary-card" id="stage-summary-${status}" data-stage="${status}" aria-label="عرض كروت مرحلة ${cardStatuses[status]}"></button>`).join('');
     $('#content').html(head('كروت الصيانة', 'تابع الكروت حسب المرحلة، ثم افتح التفاصيل أو عدّل السجل عند الحاجة.', can('cards.manage') ? button('كارت صيانة جديد', 'card-add') : '') + `<section class="panel card-filter-panel"><div class="card-filter-head"><div><h2 class="section-title">تصفية الكروت</h2><p class="subtext">حدّد التاريخ أو السيارة أو المرحلة لتحديث النتائج.</p></div><button type="button" id="clear-card-filters" class="btn btn-light"><i class="fa-solid fa-rotate-left"></i>مسح الفلاتر</button></div><div class="form-grid card-filters"><div class="field"><label for="card-date-from">من تاريخ</label><input id="card-date-from" class="form-control" type="date"></div><div class="field"><label for="card-date-to">إلى تاريخ</label><input id="card-date-to" class="form-control" type="date"></div><div class="field"><label for="card-vehicle-filter">السيارة</label><select id="card-vehicle-filter" class="form-select searchable"><option value="">كل السيارات</option>${lookup.vehicles.map(vehicle => `<option value="${vehicle.id}">${esc(vehicle.plate)}</option>`).join('')}</select></div><div class="field"><label for="card-stage-filter">المرحلة</label><select id="card-stage-filter" class="form-select">${stageFilters}</select></div></div></section><section class="stage-summary-grid" aria-label="ملخص الكروت حسب المرحلة">${stageSummary}</section><div class="panel" id="grid-area"></div>`);
     enhance();
+    $('#card-stage-filter').val(initialStatus);
     const loadGrid = () => {
         grid('cards' + (cardFilterQuery() ? '?' + cardFilterQuery() : ''), [
         col('number', 'رقم الكارت', { className: 'card-code', render: value => bdi(value) }),
@@ -1090,7 +1171,7 @@ function cards() {
             orderable: false,
             searchable: false,
             className: 'card-actions',
-            render: row => `<button class="btn btn-light card-details compact-action" aria-label="تفاصيل الكارت"><i class="fa-solid fa-eye"></i><span>تفاصيل</span></button>${can('cards.manage') ? '<button class="btn btn-light card-edit compact-action" aria-label="تعديل الكارت"><i class="fa-solid fa-pen"></i><span>تعديل</span></button>' : ''}${can('cards.manage') && row.status !== 'closed' ? '<button class="btn btn-light card-next compact-action" aria-label="المرحلة التالية"><i class="fa-solid fa-arrow-left"></i><span>المرحلة التالية</span></button>' : ''}${row.order ? `<a class="btn btn-light compact-action" aria-label="الطلب المرتبط" href="#order/${row.order.id}"><i class="fa-solid fa-file-invoice"></i><span>الطلب المرتبط</span></a>` : can('orders.create') ? '<button class="btn btn-light card-order compact-action" aria-label="إنشاء طلب مرتبط"><i class="fa-solid fa-plus"></i><span>إنشاء طلب مرتبط</span></button>' : ''}${can('cards.manage') ? '<button class="btn btn-light text-danger card-delete compact-action" aria-label="حذف الكارت"><i class="fa-solid fa-trash"></i><span>حذف</span></button>' : ''}`,
+            render: row => `<button class="btn btn-light action-details card-details compact-action" title="عرض تفاصيل الكارت" aria-label="تفاصيل الكارت"><i class="fa-solid fa-eye"></i><span>تفاصيل</span></button>${can('cards.manage') ? '<button class="btn btn-light action-edit card-edit compact-action" title="تعديل الكارت" aria-label="تعديل الكارت"><i class="fa-solid fa-pen"></i><span>تعديل</span></button>' : ''}${can('cards.manage') && row.status !== 'closed' ? '<button class="btn btn-light action-next card-next compact-action" title="نقل الكارت إلى المرحلة التالية" aria-label="المرحلة التالية"><i class="fa-solid fa-arrow-left"></i><span>المرحلة التالية</span></button>' : ''}${row.order ? `<a class="btn btn-light action-details compact-action" title="فتح الطلب المرتبط" aria-label="الطلب المرتبط" href="#order/${row.order.id}"><i class="fa-solid fa-file-invoice"></i><span>الطلب المرتبط</span></a>` : can('orders.create') ? '<button class="btn btn-light action-add card-order compact-action" title="إنشاء طلب مرتبط" aria-label="إنشاء طلب مرتبط"><i class="fa-solid fa-plus"></i><span>إنشاء طلب مرتبط</span></button>' : ''}${can('cards.manage') ? '<button class="btn btn-light action-delete card-delete compact-action" title="حذف الكارت" aria-label="حذف الكارت"><i class="fa-solid fa-trash"></i><span>حذف</span></button>' : ''}`,
         },
         ]);
         $('#records').addClass('maintenance-card-table').closest('.table-responsive').addClass('maintenance-card-table-wrap');
@@ -1284,6 +1365,170 @@ function uploadFile(orderId, collection, file, label = '') {
     return $.ajax({ url: `/api/orders/${orderId}/media`, method: 'POST', data, processData: false, contentType: false });
 }
 
+function photoIcon(label) {
+    return ({ front: 'car', back: 'car-rear', right: 'car-side', left: 'car-side', angle_front: 'car', angle_back: 'car-rear', interior: 'couch', odometer: 'gauge-high', damage: 'car-burst', video: 'video' })[label] || 'camera';
+}
+
+function vehicleGallery(photos, selectedId) {
+    document.getElementById('vehicle-gallery')?.remove();
+    const previousFocus = document.activeElement;
+    let index = Math.max(0, photos.findIndex(photo => photo.id === selectedId));
+    let scale = 1;
+    const dialog = document.createElement('dialog');
+    dialog.id = 'vehicle-gallery';
+    dialog.className = 'vehicle-gallery';
+    dialog.setAttribute('aria-label', 'معرض صور السيارة');
+    dialog.innerHTML = `<header><div><small>معرض الصور</small><h2 id="gallery-caption"></h2></div><div class="gallery-controls"><span id="gallery-counter" aria-live="polite"></span><button type="button" data-gallery="out" aria-label="تصغير"><i class="fa-solid fa-minus"></i></button><button type="button" data-gallery="zoom" aria-label="تكبير"><i class="fa-solid fa-plus"></i></button><button type="button" data-gallery="reset" aria-label="الحجم الأصلي"><i class="fa-solid fa-expand"></i></button><button type="button" data-gallery="close" aria-label="إغلاق المعرض"><i class="fa-solid fa-xmark"></i></button></div></header><div class="gallery-stage"><button type="button" class="gallery-prev" data-gallery="prev" aria-label="الصورة السابقة"><i class="fa-solid fa-chevron-right"></i></button><div class="gallery-canvas"><img id="gallery-image" alt=""><p id="gallery-error" hidden>تعذر تحميل الصورة. جرّب صورة أخرى.</p></div><button type="button" class="gallery-next" data-gallery="next" aria-label="الصورة التالية"><i class="fa-solid fa-chevron-left"></i></button></div><nav class="gallery-thumbs" aria-label="الصور المصغرة">${photos.map((photo, i) => `<button type="button" data-index="${i}" aria-label="عرض ${esc(lookup.photo_labels[photo.label] || photo.name)}"><img src="${esc(photo.url)}" alt="" loading="lazy"></button>`).join('')}</nav><footer>استخدم الأسهم للتنقل • Escape للإغلاق • انقر مرتين على الصورة للتكبير</footer>`;
+    document.body.append(dialog);
+    const image = dialog.querySelector('#gallery-image');
+    const zoom = amount => { scale = Math.min(3, Math.max(1, amount)); image.style.transform = `scale(${scale})`; image.classList.toggle('is-zoomed', scale > 1); };
+    const show = () => {
+        const photo = photos[index];
+        zoom(1); image.hidden = false;
+        dialog.querySelector('#gallery-error').hidden = true;
+        image.src = photo.url; image.alt = lookup.photo_labels[photo.label] || photo.name;
+        dialog.querySelector('#gallery-caption').textContent = image.alt;
+        dialog.querySelector('#gallery-counter').textContent = `${index + 1} / ${photos.length}`;
+        dialog.querySelectorAll('[data-index]').forEach((button, i) => { button.classList.toggle('active', i === index); button.setAttribute('aria-current', String(i === index)); });
+        dialog.querySelector(`[data-index="${index}"]`).scrollIntoView({ block: 'nearest', inline: 'center' });
+    };
+    image.onerror = () => { image.hidden = true; dialog.querySelector('#gallery-error').hidden = false; };
+    const move = offset => { index = (index + offset + photos.length) % photos.length; show(); };
+    dialog.addEventListener('click', event => {
+        const button = event.target.closest('button');
+        if (!button) return;
+        if (button.dataset.index !== undefined) { index = Number(button.dataset.index); show(); return; }
+        switch (button.dataset.gallery) {
+            case 'close': dialog.close(); break;
+            case 'prev': move(-1); break;
+            case 'next': move(1); break;
+            case 'zoom': zoom(scale + .5); break;
+            case 'out': zoom(scale - .5); break;
+            case 'reset': zoom(1); break;
+        }
+    });
+    image.addEventListener('dblclick', () => zoom(scale === 1 ? 2 : 1));
+    dialog.addEventListener('keydown', event => {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); move(event.key === 'ArrowLeft' ? 1 : -1); }
+    });
+    let startX = null;
+    image.addEventListener('touchstart', event => { startX = event.touches[0].clientX; }, { passive: true });
+    image.addEventListener('touchend', event => { if (scale === 1 && startX !== null && Math.abs(event.changedTouches[0].clientX - startX) > 50) move(event.changedTouches[0].clientX > startX ? -1 : 1); startX = null; });
+    const overflow = document.body.style.overflow;
+    dialog.addEventListener('close', () => { document.body.style.overflow = overflow; dialog.remove(); previousFocus?.focus(); }, { once: true });
+    dialog.showModal(); document.body.style.overflow = 'hidden'; show();
+    dialog.querySelector('[data-gallery="close"]').focus();
+}
+
+function vehicleUpload() {
+    ensureOrderDetailStyle();
+    const order = currentOrder;
+    const collection = order.status === 'draft' ? 'photos_before' : 'photos_after';
+    const labels = { ...lookup.photo_labels, video: 'فيديو السيارة (اختياري)' };
+    const pending = new Map();
+    const urls = new Map();
+    const existing = new Set(order.media.filter(m => m.collection === collection).map(m => m.label));
+    let stream = null;
+    let cameraLabel = null;
+    let uploading = false;
+    const stopCamera = () => { stream?.getTracks().forEach(track => track.stop()); stream = null; $('#vehicle-camera').prop('hidden', true); };
+    const slot = label => $(`#vehicle-slot-${label}`);
+    const status = (label, text, error = false) => slot(label).find('.vehicle-slot-status').text(text).toggleClass('text-danger', error);
+    const setFile = (label, file) => {
+        if (!file) return;
+        const valid = label === 'video' ? file.type === 'video/mp4' : ['image/jpeg', 'image/png', 'image/webp'].includes(file.type);
+        if (!valid || file.size > 10 * 1024 * 1024) {
+            status(label, !valid ? (label === 'video' ? 'اختر فيديو MP4.' : 'اختر صورة JPG أو PNG أو WebP.') : 'الحد الأقصى 10 ميجابايت لكل ملف.', true);
+            return;
+        }
+        if (urls.has(label)) URL.revokeObjectURL(urls.get(label));
+        const url = URL.createObjectURL(file);
+        urls.set(label, url);
+        pending.set(label, file);
+        slot(label).find('.vehicle-slot-preview').html(label === 'video' ? `<video controls src="${url}"></video>` : `<img src="${url}" alt="${esc(labels[label])}">`);
+        status(label, `جاهز للرفع: ${file.name}`);
+        slot(label).find('.vehicle-remove').prop('hidden', false);
+    };
+    const fileControl = (label, camera = false) => `<label class="btn btn-${camera ? 'primary' : 'light'}"><i class="fa-solid fa-${camera ? 'camera' : 'folder-open'}"></i>${camera ? 'كاميرا الهاتف' : 'اختيار ملف'}<input class="vehicle-file-input" data-slot="${label}" type="file" accept="${label === 'video' ? 'video/mp4' : 'image/jpeg,image/png,image/webp'}" ${camera ? 'capture="environment"' : ''} aria-label="${camera ? 'تصوير' : 'اختيار'} ${esc(labels[label])}"></label>`;
+    openModal(collection === 'photos_before' ? 'صور السيارة والفيديو — قبل الإصلاح' : 'صور السيارة والفيديو — بعد الإصلاح', `
+        <div class="vehicle-upload-toolbar"><label class="btn btn-primary"><i class="fa-solid fa-images"></i>اختيار عدة صور<input id="vehicle-bulk" class="vehicle-file-input" type="file" multiple accept="image/jpeg,image/png,image/webp" aria-label="اختيار عدة صور"></label><p>اختر الصور معًا ثم راجع توزيعها على الزوايا. يمكنك تغيير زاوية كل صورة قبل الرفع. الحد الأقصى لكل صورة أو فيديو: 10 ميجابايت.</p></div>
+        <div id="vehicle-camera" class="vehicle-camera" hidden><video id="vehicle-live" autoplay muted playsinline></video><div class="action-bar"><button type="button" id="vehicle-snap" class="btn btn-primary">التقاط الصورة</button><button type="button" id="vehicle-camera-close" class="btn btn-light">إغلاق الكاميرا</button></div></div>
+        <div class="vehicle-upload-grid">${Object.entries(labels).map(([label, name], index) => `<section class="vehicle-slot" id="vehicle-slot-${label}"><h3>${index + 1}. ${esc(name)}</h3><div class="vehicle-slot-preview"><i class="fa-solid fa-${photoIcon(label)}"></i></div>${label !== 'video' ? `<select class="form-select vehicle-angle" data-slot="${label}" aria-label="تغيير زاوية ${esc(name)}">${Object.entries(lookup.photo_labels).map(([key, value]) => `<option value="${key}" ${key === label ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select>` : ''}<div class="vehicle-slot-actions">${fileControl(label)}${label !== 'video' ? `${fileControl(label, true)}<button class="btn btn-light vehicle-camera-open" data-slot="${label}" type="button">فتح الكاميرا</button>` : ''}<button type="button" class="btn btn-light vehicle-remove" data-slot="${label}" hidden>إلغاء الاختيار</button></div><span class="vehicle-slot-status">${existing.has(label) ? 'توجد صورة محفوظة لهذه الزاوية' : 'لم يتم اختيار ملف'}</span></section>`).join('')}</div>
+        <div id="vehicle-upload-progress" class="vehicle-upload-progress" role="status" aria-live="polite">اختر الملفات ثم اضغط «رفع الملفات المختارة» مرة واحدة.</div>`, async () => {
+        if (!pending.size) { $('#vehicle-upload-progress').text('اختر صورة أو فيديو أولًا.'); throw new Error('files-required'); }
+        stopCamera(); uploading = true;
+        $('#editor [data-bs-dismiss]').prop('disabled', true);
+        $('#editor .modal-body input, #editor .modal-body button, #editor .modal-body select').prop('disabled', true);
+        let completed = 0;
+        const entries = [...pending.entries()];
+        try {
+            for (const [label, file] of entries) {
+                $('#vehicle-upload-progress').text(`جارٍ رفع ${completed + 1} من ${entries.length}…`);
+                try {
+                    await uploadFile(order.id, label === 'video' ? 'vehicle_video' : collection, file, label === 'video' ? '' : label);
+                    pending.delete(label); existing.add(label); completed++;
+                    slot(label).find('.vehicle-remove').prop('hidden', true);
+                    status(label, 'تم الرفع بنجاح');
+                } catch (error) {
+                    status(label, error.responseJSON?.message || 'تعذر رفع الملف. يمكنك إعادة المحاولة.', true);
+                }
+            }
+            $('#vehicle-upload-progress').text(`تم رفع ${completed} من ${entries.length}.${pending.size ? ' أعد المحاولة لرفع الملفات المتبقية فقط.' : ''}`);
+            if (pending.size) throw new Error('upload-incomplete');
+        } finally {
+            uploading = false;
+            $('#editor [data-bs-dismiss], #editor .modal-body input, #editor .modal-body button, #editor .modal-body select').prop('disabled', false);
+        }
+    });
+    $('#editor-form button[type=submit]').text('رفع الملفات المختارة');
+    Object.keys(labels).forEach(label => {
+        const saved = [...order.media].reverse().find(m => label === 'video' ? m.collection === 'vehicle_video' : m.collection === collection && m.label === label);
+        if (saved) slot(label).find('.vehicle-slot-preview').html(label === 'video' ? `<video controls preload="metadata" src="${esc(saved.url)}"></video>` : `<img src="${esc(saved.url)}" alt="${esc(labels[label])}">`);
+    });
+    $('#editor .vehicle-slot-preview img').on('error', function () { $(this).replaceWith('<i class="fa-solid fa-image" title="تعذر تحميل الصورة المحفوظة"></i>'); });
+    $('#editor').off('.vehicleUpload').on('hide.bs.modal.vehicleUpload', event => { if (uploading) event.preventDefault(); }).on('hidden.bs.modal.vehicleUpload', () => {
+        stopCamera(); urls.forEach(url => URL.revokeObjectURL(url));
+        $('#editor-form button[type=submit]').text('حفظ البيانات');
+        $('#editor').off('.vehicleUpload');
+    });
+    $('#editor .vehicle-file-input[data-slot]').on('change', function () { setFile(this.dataset.slot, this.files[0]); this.value = ''; });
+    $('#vehicle-bulk').on('change', function () {
+        const available = Object.keys(lookup.photo_labels).filter(key => !pending.has(key) && !existing.has(key));
+        const files = [...this.files];
+        files.slice(0, available.length).forEach((file, index) => setFile(available[index], file));
+        $('#vehicle-upload-progress').text(files.length > available.length ? `تم توزيع ${available.length} صور. الزوايا ممتلئة؛ لإضافة صورة لزاوية محفوظة استخدم «اختيار ملف» في بطاقتها.` : 'راجع الزوايا المعينة للصور ثم ارفع الملفات المختارة.');
+        this.value = '';
+    });
+    $('.vehicle-remove').on('click', function () { const label = this.dataset.slot; pending.delete(label); URL.revokeObjectURL(urls.get(label)); urls.delete(label); slot(label).find('.vehicle-slot-preview').html(`<i class="fa-solid fa-${photoIcon(label)}"></i>`); status(label, existing.has(label) ? 'توجد صورة محفوظة لهذه الزاوية' : 'لم يتم اختيار ملف'); $(this).prop('hidden', true); });
+    $('.vehicle-angle').on('change', function () {
+        const from = this.dataset.slot, to = this.value;
+        const a = pending.get(from), b = pending.get(to);
+        if (a) setFile(to, a); else slot(to).find('.vehicle-remove').trigger('click');
+        if (b) setFile(from, b); else slot(from).find('.vehicle-remove').trigger('click');
+        this.value = from;
+    });
+    $('.vehicle-camera-open').on('click', async function () {
+        stopCamera(); cameraLabel = this.dataset.slot;
+        try {
+            if (!navigator.mediaDevices?.getUserMedia) throw new Error('camera-unavailable');
+            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+            if (!document.getElementById('vehicle-live') || !$('#editor').hasClass('show')) { stopCamera(); return; }
+            $('#vehicle-live')[0].srcObject = stream;
+            $('#vehicle-camera').prop('hidden', false)[0].scrollIntoView({ block: 'center' });
+        } catch { status(cameraLabel, 'تعذر فتح الكاميرا. اسمح بالوصول إليها أو استخدم كاميرا الهاتف / اختيار ملف.', true); }
+    });
+    $('#vehicle-camera-close').on('click', stopCamera);
+    $('#vehicle-snap').on('click', () => {
+        const video = $('#vehicle-live')[0];
+        if (!video.videoWidth) return;
+        const label = cameraLabel;
+        const canvas = document.createElement('canvas'); canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0);
+        canvas.toBlob(blob => { if (blob) setFile(label, new File([blob], `${label}-${Date.now()}.jpg`, { type: 'image/jpeg' })); }, 'image/jpeg', .9);
+        stopCamera();
+    });
+}
+
 function upload() {
     const collections = currentOrder.status === 'draft'
         ? [{ id: 'quote', name: 'عرض السعر' }, { id: 'photos_before', name: 'صور قبل الإصلاح' }, { id: 'attachments', name: 'مرفقات إضافية' }]
@@ -1406,16 +1651,41 @@ $(document).on('click', '.remove-line', async function () {
         case 'upload':
             upload();
             break;
+        case 'vehicle-upload':
+            vehicleUpload();
+            break;
+        case 'relabel-photo': {
+            const media = currentOrder.media.find(m => m.id === Number(this.dataset.id));
+            if (!media) break;
+            openModal('إعادة تعيين زاوية الصورة', `<img class="relabel-photo-preview" src="${esc(media.url)}" alt="الصورة المحددة">${select('label', 'الزاوية الجديدة', Object.entries(lookup.photo_labels).map(([id, name]) => ({ id, name })), media.label)}<p class="subtext mt-3">تُحفظ الصورة تحت الزاوية المختارة. يمكنك إضافة صورة جديدة للزاوية الناقصة من «إضافة الصور والفيديو».</p>`, data => $.ajax({ url: '/media/' + media.id, method: 'PATCH', data: { label: data.label } }));
+            break;
+        }
         case 'receipt':
         case 'invoice':
             documentForm(action);
             break;
         case 'transition': {
             const next = this.dataset.next;
+            if (next === 'submit') {
+                const missing = [];
+                if (!currentOrder.quote_number?.trim()) missing.push('رقم عرض السعر');
+                if (!currentOrder.media.some(media => media.collection === 'quote')) missing.push('ملف عرض السعر بصيغة PDF');
+                if (currentOrder.vehicle_id) {
+                    const requiredPhotos = Object.keys(lookup.photo_labels || {});
+                    const uploadedPhotos = currentOrder.media
+                        .filter(media => media.collection === 'photos_before')
+                        .map(media => media.label);
+                    if (requiredPhotos.some(label => !uploadedPhotos.includes(label))) missing.push('صور السيارة التسع قبل الإصلاح');
+                }
+                if (missing.length) {
+                    toastr.error(`أكمل البيانات التالية قبل الإرسال للمراجعة: ${missing.join('، ')}.`);
+                    return;
+                }
+            }
             const needsReason = ['return', 'reject'].includes(next);
             const result = await Swal.fire({
                 title: 'تأكيد الإجراء',
-                text: next === 'match' ? 'سيجري النظام مطابقة المستندات والكميات والقيمة على الخادم.' : 'هل تريد تنفيذ هذا الإجراء الآن؟',
+                text: next === 'submit' ? 'تم استيفاء رقم عرض السعر ومستند العرض. هل تريد إرسال الطلب للمراجعة؟' : next === 'match' ? 'سيجري النظام مطابقة المستندات والكميات والقيمة على الخادم.' : 'هل تريد تنفيذ هذا الإجراء الآن؟',
                 input: needsReason ? 'textarea' : undefined,
                 inputLabel: needsReason ? 'سبب الإجراء' : undefined,
                 showCancelButton: true,
@@ -1448,7 +1718,7 @@ $(document).on('click', '.remove-line', async function () {
             movement(this.dataset.type);
             break;
         case 'balances':
-            inventoryTable(false);
+            inventoryTable(false, new URLSearchParams(location.hash.split('?')[1] || '').get('low_stock') === '1');
             break;
         case 'movements':
             inventoryTable(true);
