@@ -37,6 +37,7 @@ Route::middleware(['auth', 'active'])->group(function () {
         Route::get('orders/summary', [OrderController::class, 'summary']);
         Route::post('orders', [OrderController::class, 'store']);
         Route::get('orders/{order}', [OrderController::class, 'show']);
+        Route::get('orders/{order}/transfer-pdf', [OrderController::class, 'transferPdf']);
         Route::put('orders/{order}', [OrderController::class, 'update']);
         Route::post('orders/{order}/actions/{action}', [OrderController::class, 'action']);
         foreach (['receipt', 'invoice', 'payment'] as $method) {
@@ -44,6 +45,7 @@ Route::middleware(['auth', 'active'])->group(function () {
         }
         Route::post('orders/{order}/media', [MediaController::class, 'store']);
         Route::get('inventory/balances', [InventoryController::class, 'balances']);
+        Route::get('inventory/items', [InventoryController::class, 'items']);
         Route::get('inventory/movements', [InventoryController::class, 'movements']);
         Route::post('inventory/movements', [InventoryController::class, 'store']);
         Route::delete('records/{kind}', function (\Illuminate\Http\Request $request, string $kind, DeletionService $service) {

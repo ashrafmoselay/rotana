@@ -29,17 +29,20 @@ class MediaController extends Controller
             };
             Access::allow($permission);
             if ($collection === 'vehicle_video') {
-                abort_unless(in_array($order->status, [S::Draft, S::Matching, S::Ready]), 422, 'الفيديو متاح في المسودة وأثناء الاستلام والمطابقة.');
+                abort_unless($order->status === S::Draft || $order->canRecordDocuments(), 422, 'الفيديو غير متاح في هذه المرحلة.');
                 abort_unless($r->file('file')->getMimeType() === 'video/mp4', 422, 'ارفع فيديو بصيغة MP4.');
             }
             if (in_array($collection, ['quote', 'photos_before', 'attachments'])) {
                 abort_unless($order->status === S::Draft, 422, 'لا يمكن تغيير مرفقات الطلب بعد الإرسال.');
             }
-            if (in_array($collection, ['invoice', 'proof'])) {
+            if ($collection === 'invoice') {
+                abort_unless($order->canRecordDocuments(), 422, 'الفاتورة غير متاحة بهذه المرحلة.');
+            }
+            if ($collection === 'proof') {
                 abort_unless(in_array($order->status, [S::Matching, S::Ready]), 422, 'المرفقات غير متاحة بهذه المرحلة.');
             }
             if ($collection === 'photos_after') {
-                abort_unless(in_array($order->status, [S::Matching, S::Ready]), 422, 'صور بعد الإصلاح متاحة أثناء الاستلام والمطابقة.');
+                abort_unless($order->canRecordDocuments(), 422, 'صور بعد الإصلاح غير متاحة في هذه المرحلة.');
             }
             if (str_starts_with($collection, 'photos_')) {
                 abort_unless(in_array($r->file('file')->getMimeType(), ['image/jpeg', 'image/png', 'image/webp']) && isset($data['label']), 422, 'الصورة والجهة مطلوبة.');
@@ -91,7 +94,7 @@ class MediaController extends Controller
     private function allowPhotoChange(PurchaseOrder $order, Media $media): void
     {
         $allowed = $media->collection_name === 'photos_after'
-            ? in_array($order->status, [S::Matching, S::Ready])
+            ? $order->canRecordDocuments()
             : $order->status === S::Draft;
         abort_unless($allowed, 422, 'لا يمكن تعديل هذا المرفق في المرحلة الحالية.');
     }

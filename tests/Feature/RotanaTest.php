@@ -439,6 +439,74 @@ class RotanaTest extends TestCase
         $this->assertContains($foreign->number, collect($admin['data'])->pluck('number')->all());
     }
 
+    public function test_inventory_item_filter_includes_only_warehouse_items_and_matching_movement_lines(): void
+    {
+        $item = Item::create(['sku' => 'REPORT-ITEM', 'name' => 'صنف التقرير', 'unit' => 'قطعة', 'track_stock' => true, 'active' => false]);
+        $other = Item::create(['sku' => 'REPORT-OTHER', 'name' => 'صنف آخر', 'unit' => 'قطعة', 'track_stock' => true]);
+        $local = $this->createStockMovementForWarehouse(1, ['item_id' => $item->id, 'quantity_milli' => -1234]);
+        $local->lines()->create(['item_id' => $other->id, 'quantity_milli' => -2000, 'unit_cost_minor' => 0]);
+        $this->createStockMovementForWarehouse(2, ['item_id' => $other->id]);
+        $incoming = $this->createStockMovementForWarehouse(2, ['item_id' => $item->id, 'type' => 'transfer', 'destination_warehouse_id' => 1]);
+        $balanceOnly = Item::create(['sku' => 'REPORT-ZERO', 'name' => 'رصيد صفر', 'unit' => 'قطعة', 'track_stock' => true]);
+        StockBalance::create(['warehouse_id' => 1, 'item_id' => $balanceOnly->id, 'quantity_milli' => 0]);
+        $foreignOnly = Item::create(['sku' => 'REPORT-FOREIGN', 'name' => 'صنف خارج المخزن', 'unit' => 'قطعة', 'track_stock' => true]);
+        $this->createStockMovementForWarehouse(2, ['item_id' => $foreignOnly->id]);
+
+        $this->actingAs(User::where('email', 'employee@rotana.test')->firstOrFail());
+        $ids = collect($this->getJson('/api/inventory/items?warehouse_id=1')->assertOk()->json())->pluck('id');
+        $this->assertContains($item->id, $ids);
+        $this->assertContains($balanceOnly->id, $ids);
+        $this->assertNotContains($foreignOnly->id, $ids);
+        $this->getJson('/api/inventory/items?warehouse_id=2')->assertForbidden();
+        $rows = $this->stockMovementsDataTable(['warehouse_id' => 1, 'item_id' => $item->id])->assertOk()->json('data');
+        $this->assertEqualsCanonicalizing([$local->id, $incoming->id], array_column($rows, 'id'));
+        foreach ($rows as $row) {
+            $this->assertCount(1, $row['lines']);
+            $this->assertSame($item->id, $row['lines'][0]['item_id']);
+        }
+        $this->inventoryBalancesDataTable(['item_id' => $balanceOnly->id])->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.quantity_milli', 0);
+        $this->stockMovementsDataTable(['item_id' => 'invalid'])->assertUnprocessable();
+    }
+
+    public function test_inventory_movement_excel_exports_all_filtered_lines_and_signed_quantities(): void
+    {
+        $item = Item::create(['sku' => 'EXPORT-ITEM', 'name' => '=HYPERLINK("evil")', 'unit' => 'قطعة', 'track_stock' => true]);
+        $outgoing = $this->createStockMovementForWarehouse(1, ['item_id' => $item->id, 'quantity_milli' => -1234, 'notes' => 'EXPORT-MATCH']);
+        $outgoing->lines()->create(['item_id' => Item::where('id', '!=', $item->id)->firstOrFail()->id, 'quantity_milli' => -9000, 'unit_cost_minor' => 0]);
+        $incoming = $this->createStockMovementForWarehouse(2, ['item_id' => $item->id, 'type' => 'transfer', 'destination_warehouse_id' => 1, 'quantity_milli' => -2500, 'notes' => 'EXPORT-MATCH']);
+        $this->createStockMovementForWarehouse(1, ['item_id' => $item->id, 'notes' => 'EXCLUDED']);
+        $this->createStockMovementForWarehouse(2, ['item_id' => $item->id, 'notes' => 'EXPORT-MATCH']);
+        $params = ['warehouse_id' => 1, 'item_id' => $item->id, 'length' => 1, 'start' => 1, 'search' => ['value' => 'EXPORT-MATCH'], 'export' => 1];
+        $response = $this->get('/api/inventory/movements?'.http_build_query($this->stockMovementsDataTableParams($params)))->assertOk();
+        $book = IOFactory::load($response->baseResponse->getFile()->getPathname());
+        $sheet = $book->getActiveSheet();
+        $rows = array_slice($sheet->toArray(), 1);
+        $this->assertCount(2, $rows);
+        $byNumber = collect($rows)->keyBy(fn ($row) => $row[0]);
+        $this->assertEquals(-1.234, $byNumber[$outgoing->number][9]);
+        $this->assertEquals(2.5, $byNumber[$incoming->number][9]);
+        $this->assertSame('تحويل بين المخازن', $byNumber[$incoming->number][2]);
+        $this->assertSame('s', $sheet->getCell('H2')->getDataType());
+        $this->assertSame($item->name, $sheet->getCell('H2')->getValue());
+        $book->disconnectWorksheets();
+    }
+
+    public function test_inventory_report_endpoints_require_permissions_and_branch_access(): void
+    {
+        $this->actingAs(User::where('email', 'employee@rotana.test')->firstOrFail());
+        $this->getJson('/api/inventory/movements?warehouse_id=2&export=1')->assertForbidden();
+        $blocked = User::create(['name' => 'No report access', 'email' => 'no-report@example.test', 'password' => 'Testing-Rotana-2026', 'active' => true, 'all_branches' => true]);
+        $this->actingAs($blocked);
+        $this->getJson('/api/inventory/items?warehouse_id=1')->assertForbidden();
+        $this->getJson('/api/inventory/movements?warehouse_id=1&export=1')->assertForbidden();
+        $blocked->givePermissionTo('inventory.view');
+        $this->getJson('/api/inventory/items?warehouse_id=1')->assertOk();
+        $this->getJson('/api/inventory/movements?warehouse_id=1&export=1')->assertForbidden();
+        auth()->logout();
+        $this->getJson('/api/inventory/items?warehouse_id=1')->assertUnauthorized();
+        $this->getJson('/api/inventory/movements?warehouse_id=1&export=1')->assertUnauthorized();
+    }
+
     public function test_permissions_and_branch_boundaries(): void
     {
         $u = User::where('email', 'employee@rotana.test')->first();
@@ -795,6 +863,189 @@ class RotanaTest extends TestCase
 
         PurchaseOrder::findOrFail($id)->update(['status' => 'accountant']);
         $this->putJson('/api/orders/'.$id, $this->validOrderPayload())->assertUnprocessable()->assertJsonValidationErrors(['order']);
+    }
+
+    public function test_vehicle_order_stores_its_own_odometer_without_requiring_a_maintenance_card(): void
+    {
+        $vehicle = Vehicle::findOrFail(1);
+        $oldOdometer = $vehicle->odometer;
+        $payload = $this->validOrderPayload(['category' => 'maintenance', 'vehicle_id' => 1, 'warehouse_id' => null, 'odometer' => $oldOdometer + 25]);
+        $order = $this->postJson('/api/orders', $payload)->assertCreated()->assertJsonPath('maintenance_card_id', null)->assertJsonPath('odometer', $oldOdometer + 25)->json('id');
+        $this->assertSame($oldOdometer, $vehicle->fresh()->odometer);
+        $this->getJson('/api/orders/'.$order)->assertOk()->assertJsonPath('odometer', $oldOdometer + 25);
+        unset($payload['odometer']);
+        $this->putJson('/api/orders/'.$order, $payload)->assertOk()->assertJsonPath('odometer', $oldOdometer + 25);
+        $this->postJson('/api/orders', $payload + ['odometer' => '-1'])->assertUnprocessable()->assertJsonValidationErrors('odometer');
+
+        $card = \App\Models\MaintenanceCard::create(['number' => 'CARD-ODO', 'vehicle_id' => 1, 'branch_id' => $vehicle->branch_id, 'created_by' => auth()->id(), 'date' => today(), 'type' => 'صيانة', 'status' => 'pending', 'odometer' => $oldOdometer - 50]);
+        $this->postJson('/api/orders', array_replace($payload, ['maintenance_card_id' => $card->id]))->assertCreated()->assertJsonPath('odometer', $oldOdometer - 50);
+        $this->postJson('/api/orders', $this->validOrderPayload(['category' => 'utilities', 'vehicle_id' => 1, 'warehouse_id' => 1, 'maintenance_card_id' => $card->id, 'odometer' => 123]))->assertCreated()->assertJsonPath('vehicle_id', null)->assertJsonPath('warehouse_id', null)->assertJsonPath('maintenance_card_id', null)->assertJsonPath('odometer', null);
+    }
+
+    public function test_advance_payment_keeps_approvals_and_allows_documents_after_payment_before_closure(): void
+    {
+        $id = $this->postJson('/api/orders', $this->validOrderPayload(['payment_timing' => 'before_receipt']))->assertCreated()->json('id');
+        $url = '/api/orders/'.$id;
+        $order = PurchaseOrder::findOrFail($id);
+        $before = StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli');
+        $this->postJson($url.'/media', ['collection' => 'quote', 'file' => UploadedFile::fake()->create('quote.pdf', 20, 'application/pdf')])->assertCreated();
+        $this->postJson($url.'/actions/match')->assertUnprocessable();
+        $this->postJson($url.'/actions/submit')->assertOk()->assertJsonPath('status', 'accountant');
+        foreach (['manager', 'supervisor', 'matching'] as $status) {
+            $this->postJson($url.'/actions/approve')->assertOk()->assertJsonPath('status', $status);
+        }
+        $this->postJson($url.'/actions/match')->assertOk()->assertJsonPath('status', 'ready');
+        $this->assertDatabaseHas('approval_events', ['purchase_order_id' => $id, 'action' => 'orders.advance_payment_approved']);
+        $this->assertNull($order->fresh()->receipt);
+        $this->assertNull($order->fresh()->invoice);
+        $order->supplier->update(['iban' => 'SA0380000000608010167519']);
+        $this->get($url.'/transfer-pdf')->assertOk()->assertHeader('Content-Type', 'application/pdf');
+        $proof = $this->postJson($url.'/media', ['collection' => 'proof', 'file' => UploadedFile::fake()->create('proof.pdf', 20, 'application/pdf')])->assertCreated()->json('id');
+        $payment = ['reference' => 'ADVANCE-PAYMENT', 'date' => today()->toDateString(), 'amount' => Amounts::money($order->total_minor), 'media_id' => $proof];
+        $this->postJson($url.'/payment', array_replace($payment, ['amount' => '1']))->assertUnprocessable();
+        $this->postJson($url.'/payment', $payment)->assertOk()->assertJsonPath('status', 'paid');
+        $this->postJson($url.'/payment', array_replace($payment, ['reference' => 'ADVANCE-DUPLICATE']))->assertUnprocessable();
+        $this->assertSame($before, StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli'));
+        $this->postJson($url.'/actions/close')->assertUnprocessable();
+        $this->getJson($url)->assertOk()->assertJsonPath('can_record_documents', true);
+        $lines = $order->lines->map(fn ($line) => ['order_line_id' => $line->id, 'quantity' => Amounts::quantity($line->quantity_milli)])->all();
+        $document = ['date' => today()->toDateString(), 'lines' => $lines];
+        $this->postJson($url.'/receipt', $document)->assertOk()->assertJsonPath('status', 'paid');
+        $this->postJson($url.'/receipt', $document)->assertOk();
+        $this->assertSame($before + 2000, StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli'));
+        $invoice = $this->postJson($url.'/media', ['collection' => 'invoice', 'file' => UploadedFile::fake()->create('invoice.pdf', 20, 'application/pdf')])->assertCreated()->json('id');
+        $invoiceData = $document + ['number' => 'ADVANCE-INVOICE', 'total' => '1', 'media_id' => $invoice];
+        $this->postJson($url.'/invoice', $invoiceData)->assertOk()->assertJsonPath('status', 'paid');
+        $this->postJson($url.'/actions/close')->assertUnprocessable();
+        $invoiceData['total'] = Amounts::money($order->total_minor);
+        $this->postJson($url.'/invoice', $invoiceData)->assertOk();
+        $this->postJson($url.'/actions/close')->assertOk()->assertJsonPath('status', 'closed');
+        $this->assertSame(1, $order->payment()->count());
+        $this->postJson($url.'/receipt', $document)->assertUnprocessable();
+        $this->postJson($url.'/invoice', $invoiceData)->assertUnprocessable();
+    }
+
+    public function test_service_expense_requires_supporting_document_and_invoice_but_no_vehicle_or_receipt(): void
+    {
+        $id = $this->postJson('/api/orders', $this->validOrderPayload(['category' => 'utilities', 'quote_number' => null, 'warehouse_id' => null]))->assertCreated()->json('id');
+        $url = '/api/orders/'.$id;
+        $this->postJson($url.'/actions/submit')->assertUnprocessable();
+        $this->postJson($url.'/media', ['collection' => 'attachments', 'file' => UploadedFile::fake()->image('bill.jpg')])->assertCreated();
+        $this->postJson($url.'/actions/submit')->assertOk();
+        foreach (range(1, 3) as $stage) $this->postJson($url.'/actions/approve')->assertOk();
+        $this->postJson($url.'/actions/match')->assertUnprocessable();
+        $order = PurchaseOrder::findOrFail($id);
+        $lines = $order->lines->map(fn ($line) => ['order_line_id' => $line->id, 'quantity' => Amounts::quantity($line->quantity_milli)])->all();
+        $document = ['date' => today()->toDateString(), 'lines' => $lines];
+        $this->postJson($url.'/receipt', $document)->assertUnprocessable();
+        $invoice = $this->postJson($url.'/media', ['collection' => 'invoice', 'file' => UploadedFile::fake()->create('invoice.pdf', 20, 'application/pdf')])->assertCreated()->json('id');
+        $this->postJson($url.'/invoice', $document + ['number' => 'UTILITY-INVOICE', 'total' => Amounts::money($order->total_minor), 'media_id' => $invoice])->assertOk();
+        $this->postJson($url.'/actions/match')->assertOk()->assertJsonPath('status', 'ready');
+        $this->getJson($url)->assertOk()->assertJsonPath('requires_receipt', false)->assertJsonPath('matched', true);
+        $this->assertNull($order->fresh()->receipt);
+    }
+
+    public function test_advance_payment_cannot_bypass_permission_scope_or_a_known_invoice_difference(): void
+    {
+        $this->postJson('/api/orders', $this->validOrderPayload(['payment_timing' => 'invalid']))->assertUnprocessable()->assertJsonValidationErrors('payment_timing');
+        $order = PurchaseOrder::where('status', 'matching')->whereHas('invoice', fn ($q) => $q->whereColumn('total_minor', '!=', 'purchase_orders.total_minor'))->firstOrFail();
+        $order->update(['payment_timing' => 'before_receipt']);
+        $this->postJson('/api/orders/'.$order->id.'/actions/match')->assertUnprocessable();
+        $this->actingAs(User::where('email', 'employee@rotana.test')->firstOrFail());
+        $this->postJson('/api/orders/'.$order->id.'/actions/match')->assertForbidden();
+        $order->update(['branch_id' => 2]);
+        $this->postJson('/api/orders/'.$order->id.'/actions/match')->assertForbidden();
+    }
+
+    public function test_purchase_order_tax_is_limited_to_fifteen_percent_or_zero(): void
+    {
+        foreach (['5', '14.99', '16', '100'] as $tax) {
+            $this->postJson('/api/orders', $this->validOrderPayload(['tax_percent' => $tax]))->assertUnprocessable()->assertJsonValidationErrors('tax_percent');
+        }
+        $response = $this->postJson('/api/orders', $this->validOrderPayload(['tax_percent' => '15.00', 'lines' => [['item_id' => 1, 'quantity' => '1.5', 'unit_price' => '10']]]))->assertCreated();
+        $response->assertJsonPath('subtotal_minor', 1500)->assertJsonPath('tax_minor', 225)->assertJsonPath('total_minor', 1725);
+        $this->putJson('/api/orders/'.$response->json('id'), $this->validOrderPayload(['tax_percent' => '5']))->assertUnprocessable();
+        $this->assertDatabaseHas('purchase_orders', ['id' => $response->json('id'), 'tax_basis_points' => 1500, 'total_minor' => 1725]);
+    }
+
+    public function test_fractional_stock_order_receipt_invoice_matching_and_correction_keep_precision(): void
+    {
+        $order = $this->postJson('/api/orders', $this->validOrderPayload(['lines' => [['item_id' => 1, 'quantity' => '1.5', 'unit_price' => '10']]]))->assertCreated()->json();
+        $id = $order['id'];
+        $this->assertSame(1500, $order['lines'][0]['quantity_milli']);
+        PurchaseOrder::findOrFail($id)->update(['status' => 'matching']);
+        $before = StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli');
+        $data = ['date' => today()->toDateString(), 'lines' => [['order_line_id' => $order['lines'][0]['id'], 'quantity' => '1.5']]];
+        $this->postJson('/api/orders/'.$id.'/receipt', $data)->assertOk();
+        $this->postJson('/api/orders/'.$id.'/receipt', $data)->assertOk();
+        $this->assertSame($before + 1500, StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli'));
+        $media = $this->postJson('/api/orders/'.$id.'/media', ['collection' => 'invoice', 'file' => UploadedFile::fake()->create('invoice.pdf', 20, 'application/pdf')])->assertCreated()->json('id');
+        $this->postJson('/api/orders/'.$id.'/invoice', $data + ['number' => 'FRACTION-INVOICE', 'total' => '17.25', 'media_id' => $media])->assertOk();
+        $this->postJson('/api/orders/'.$id.'/actions/match')->assertOk()->assertJsonPath('status', 'ready');
+        $data['lines'][0]['quantity'] = '1.25';
+        $this->postJson('/api/orders/'.$id.'/receipt', $data)->assertOk()->assertJsonPath('status', 'matching');
+        $this->assertSame($before + 1250, StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli'));
+        $this->postJson('/api/orders/'.$id.'/actions/match')->assertUnprocessable();
+    }
+
+    public function test_fractional_inventory_movements_conserve_stock_and_reject_duplicate_or_excess_return(): void
+    {
+        $before = StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli');
+        $data = $this->movement(['lines' => [['item_id' => 1, 'quantity' => '1.5']]]);
+        $issue = $this->postJson('/api/inventory/movements', $data)->assertCreated()->json('id');
+        $this->postJson('/api/inventory/movements', $data)->assertUnprocessable();
+        $this->assertSame($before - 1500, StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli'));
+        $this->postJson('/api/inventory/movements', $this->movement(['type' => 'return', 'source_movement_id' => $issue, 'lines' => [['item_id' => 1, 'quantity' => '1.25']]]))->assertCreated();
+        $this->postJson('/api/inventory/movements', $this->movement(['type' => 'return', 'source_movement_id' => $issue, 'lines' => [['item_id' => 1, 'quantity' => '0.5']]]))->assertUnprocessable();
+        $this->assertSame($before - 250, StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli'));
+        $total = StockBalance::where('item_id', 1)->sum('quantity_milli');
+        $this->postJson('/api/inventory/movements', $this->movement(['type' => 'transfer', 'destination_warehouse_id' => 2, 'lines' => [['item_id' => 1, 'quantity' => '0.125']]]))->assertCreated();
+        $this->assertEquals($total, StockBalance::where('item_id', 1)->sum('quantity_milli'));
+        $this->postJson('/api/inventory/movements', $this->movement(['type' => 'adjust', 'lines' => [['item_id' => 1, 'quantity' => '2.5']]]))->assertCreated();
+        $this->assertSame(2500, StockBalance::where('warehouse_id', 1)->where('item_id', 1)->value('quantity_milli'));
+        $this->postJson('/api/inventory/movements', $this->movement(['lines' => [['item_id' => 1, 'quantity' => '0.0001']]]))->assertUnprocessable();
+    }
+
+    public function test_ready_transfer_pdf_includes_bank_and_approvals_without_changing_order(): void
+    {
+        $order = PurchaseOrder::where('status', 'ready')->firstOrFail();
+        $order->supplier->update(['iban' => 'SA0380000000608010167519']);
+        $this->getJson('/api/orders/'.$order->id)->assertOk()->assertJsonPath('supplier.iban', 'SA0380000000608010167519');
+        $before = $order->fresh()->toArray();
+        $events = $order->approvals()->count();
+        $response = $this->get('/api/orders/'.$order->id.'/transfer-pdf')->assertOk()->assertHeader('Content-Type', 'application/pdf');
+        $this->assertStringStartsWith('%PDF-', $response->getContent());
+        $this->assertStringContainsString('attachment;', $response->headers->get('Content-Disposition'));
+        $html = view('orders.transfer-pdf', ['order' => $order->fresh(['lines', 'invoice', 'supplier', 'creator', 'approvals.user']), 'generatedAt' => now()])->render();
+        foreach ([$order->number, 'SA0380000000608010167519', 'طلب معتمد وجاهز للتحويل', 'اعتماد المدير', Amounts::money($order->total_minor)] as $text) {
+            $this->assertStringContainsString($text, $html);
+        }
+        $this->assertSame($before, $order->fresh()->toArray());
+        $this->assertSame($events, $order->approvals()->count());
+        $this->assertNull($order->fresh()->payment);
+    }
+
+    public function test_transfer_pdf_blocks_missing_account_wrong_stage_mismatch_and_unauthorized_access(): void
+    {
+        $order = PurchaseOrder::where('status', 'ready')->firstOrFail();
+        $url = '/api/orders/'.$order->id.'/transfer-pdf';
+        $this->getJson($url)->assertUnprocessable()->assertJsonValidationErrors('order');
+        $order->supplier->update(['iban' => 'SA0380000000608010167519']);
+        $order->invoice->update(['total_minor' => $order->total_minor + 1]);
+        $this->getJson($url)->assertUnprocessable();
+        $order->invoice->update(['total_minor' => $order->total_minor]);
+        foreach (['draft', 'accountant', 'manager', 'supervisor', 'matching', 'paid', 'closed', 'rejected'] as $status) {
+            $order->update(['status' => $status]);
+            $this->getJson($url)->assertUnprocessable();
+        }
+        $order->update(['status' => 'ready', 'branch_id' => 2]);
+        $this->actingAs(User::where('email', 'employee@rotana.test')->firstOrFail());
+        $this->getJson($url)->assertForbidden();
+        $user = User::create(['name' => 'No PDF access', 'email' => 'no-pdf@example.test', 'password' => 'Testing-Rotana-2026', 'active' => true, 'all_branches' => true]);
+        $this->actingAs($user);
+        $this->getJson($url)->assertForbidden();
+        auth()->logout();
+        $this->getJson($url)->assertUnauthorized();
     }
 
     public function test_purchase_order_accepts_zero_nullable_and_optional_values_allowed_by_rules(): void

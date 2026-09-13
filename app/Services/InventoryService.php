@@ -84,7 +84,7 @@ class InventoryService
                 $item = Item::findOrFail($line['item_id']);
                 $this->assert($item->track_stock && $item->active, 'الصنف ليس صنف مخزون نشطًا.');
                 $q = Amounts::scaled($line['quantity'], 3);
-                $this->assert($q % 1000 === 0 && ($data['type'] === 'adjust' || $q > 0), 'كمية المخزون يجب أن تكون عددًا صحيحًا.');
+                $this->assert($data['type'] === 'adjust' || $q > 0, 'كمية المخزون يجب أن تكون أكبر من صفر.');
                 $signed = $q;
                 if ($data['type'] === 'return') {
                     $original = $source->lines()->where('item_id', $item->id)->first();

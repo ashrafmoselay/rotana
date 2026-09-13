@@ -15,7 +15,28 @@ class PurchaseOrder extends Model implements HasMedia
 
     protected function casts(): array
     {
-        return ['status' => OrderStatus::class, 'subtotal_minor' => 'integer', 'tax_minor' => 'integer', 'total_minor' => 'integer', 'tax_basis_points' => 'integer'];
+        return ['status' => OrderStatus::class, 'subtotal_minor' => 'integer', 'tax_minor' => 'integer', 'total_minor' => 'integer', 'tax_basis_points' => 'integer', 'odometer' => 'integer'];
+    }
+
+    public function requiresReceipt(): bool
+    {
+        return ! in_array($this->category, ['utilities', 'branches'], true);
+    }
+
+    public function isAdvancePayment(): bool
+    {
+        return $this->payment_timing === 'before_receipt';
+    }
+
+    public function canRecordDocuments(): bool
+    {
+        return in_array($this->status, [OrderStatus::Matching, OrderStatus::Ready], true)
+            || ($this->isAdvancePayment() && $this->status === OrderStatus::Paid);
+    }
+
+    public function maintenanceCard()
+    {
+        return $this->belongsTo(MaintenanceCard::class);
     }
 
     public function lines()

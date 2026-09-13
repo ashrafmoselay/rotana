@@ -112,6 +112,7 @@ final class UiText
             'orders.return' => 'إعادة الطلب للتعديل',
             'orders.reject' => 'رفض الطلب',
             'orders.matched' => 'اعتماد المطابقة',
+            'orders.advance_payment_approved' => 'اعتماد الدفع المقدم قبل الاستلام والفاتورة',
             'orders.rematch_required' => 'إعادة فتح المطابقة',
             'orders.closed' => 'إغلاق الطلب',
             'receipts.created' => 'تسجيل استلام',

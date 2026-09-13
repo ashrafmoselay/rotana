@@ -55,7 +55,8 @@ class PurchasingService
                 Access::branch($warehouse->branch_id);
                 $this->require($warehouse->active && $warehouse->branch_id === $branch->id, 'اختر مخزنًا نشطًا من فرع الطلب.');
             }
-            if (! empty($data['maintenance_card_id'])) {
+            $card = null;
+            if ($vehicle && ! empty($data['maintenance_card_id'])) {
                 $card = MaintenanceCard::lockForUpdate()->findOrFail($data['maintenance_card_id']);
                 Access::branch($card->branch_id);
                 $this->require($card->vehicle_id === $vehicle?->id && $card->branch_id === $branch->id, 'كارت الصيانة لا يخص هذه السيارة أو الفرع.');
@@ -69,7 +70,7 @@ class PurchasingService
                 $p = Amounts::scaled($line['unit_price']);
                 $this->require($item->active && $q > 0, 'الصنف غير نشط أو الكمية غير صحيحة.');
                 if ($warehouse) {
-                    $this->require($item->track_stock && $q % 1000 === 0, 'طلبات التزويد تتطلب أصناف مخزون بكميات صحيحة.');
+                    $this->require($item->track_stock, 'طلبات التزويد تتطلب أصناف مخزون.');
                 }
                 $total = Amounts::line($q, $p);
                 $this->require($total <= 100000000000000, 'قيمة البند تتجاوز الحد المسموح.');
@@ -77,9 +78,14 @@ class PurchasingService
                 $subtotal += $total;
             }
             $taxBasis = Amounts::scaled($data['tax_percent']);
+            $this->require(in_array($taxBasis, [0, 1500], true), 'الضريبة المتاحة هي 15% أو بدون ضريبة.');
             $tax = Amounts::tax($subtotal, $taxBasis);
             $this->require($subtotal + $tax <= 99999999900, 'إجمالي الطلب يتجاوز الحد المسموح.');
             $values = ['category' => $data['category'], 'branch_id' => $branch->id, 'cost_center_id' => $center->id, 'supplier_id' => $supplier->id, 'vehicle_id' => $vehicle?->id, 'warehouse_id' => $warehouse?->id, 'maintenance_card_id' => $data['maintenance_card_id'] ?? null, 'date' => $data['date'], 'priority' => $data['priority'], 'quote_number' => $data['quote_number'] ?? null, 'notes' => $data['notes'] ?? null, 'branch_name' => $branch->name, 'region_name' => $branch->region->name, 'supplier_name' => $supplier->name, 'vehicle_plate' => $vehicle?->plate, 'subtotal_minor' => $subtotal, 'tax_basis_points' => $taxBasis, 'tax_minor' => $tax, 'total_minor' => $subtotal + $tax];
+            $values['maintenance_card_id'] = $card?->id;
+            $values['odometer'] = $vehicle ? ($data['odometer'] ?? ($order?->vehicle_id === $vehicle->id ? $order?->odometer : null) ?? $card?->odometer ?? $vehicle->odometer) : null;
+            $values['payment_timing'] = $data['payment_timing'] ?? $order?->payment_timing ?? 'after_receipt';
+            $this->require(in_array($values['payment_timing'], ['after_receipt', 'before_receipt'], true), 'اختر توقيت دفع صحيحًا.');
             if ($order) {
                 $order->update($values);
                 $order->lines()->delete();
@@ -117,7 +123,11 @@ class PurchasingService
             if ($action === 'submit') {
                 Access::allow('orders.submit');
                 $this->require($order->status === S::Draft, 'الطلب ليس مسودة.');
-                $this->require((bool) $order->quote_number && $order->getMedia('quote')->isNotEmpty(), 'أدخل رقم عرض السعر وأرفق مستنده.');
+                if ($order->requiresReceipt()) {
+                    $this->require((bool) $order->quote_number && $order->getMedia('quote')->isNotEmpty(), 'أدخل رقم عرض السعر وأرفق مستنده.');
+                } else {
+                    $this->require($order->getMedia('attachments')->isNotEmpty() || $order->getMedia('quote')->isNotEmpty(), 'أرفق مستند المصروف أو فاتورة الخدمة قبل الإرسال.');
+                }
                 if ($order->vehicle_id) {
                     $labels = $order->getMedia('photos_before')->map(fn ($m) => $m->getCustomProperty('label'))->all();
                     $this->require(! array_diff(array_keys(config('rotana.photo_labels')), $labels), 'أكمل الصور التسع المطلوبة.');
@@ -142,11 +152,14 @@ class PurchasingService
             } elseif ($action === 'match') {
                 Access::allow('orders.match');
                 $this->require($order->status === S::Matching, 'الطلب ليس في مرحلة المطابقة.');
-                $this->require($this->matches($order), 'توجد فروقات في الكميات أو قيمة الفاتورة أو مستندات ناقصة.');
-                $this->change($order, S::Ready, 'orders.matched');
+                $this->require($this->readyForPayment($order), 'توجد فروقات في الكميات أو قيمة الفاتورة أو مستندات ناقصة.');
+                $this->change($order, S::Ready, $order->isAdvancePayment() ? 'orders.advance_payment_approved' : 'orders.matched');
             } elseif ($action === 'close') {
                 Access::allow('orders.close');
                 $this->require($order->status === S::Paid, 'سجل الحوالة أولًا.');
+                if ($order->isAdvancePayment()) {
+                    $this->require($this->matches($order), 'أكمل الفاتورة والاستلام المطلوب وطابق المستندات قبل إغلاق الطلب المدفوع مقدمًا.');
+                }
                 $this->change($order, S::Closed, 'orders.closed');
             } else {
                 abort(422, 'إجراء غير معروف.');
@@ -159,14 +172,45 @@ class PurchasingService
     public function matches(PurchaseOrder $order): bool
     {
         $order->load('lines', 'receipt.lines', 'invoice.lines');
-        if (! $order->receipt || ! $order->invoice || $order->total_minor !== (int) $order->invoice->total_minor) {
+        if (! $this->invoiceMatches($order)) {
+            return false;
+        }
+        if (! $order->requiresReceipt()) {
+            return true;
+        }
+        if (! $order->receipt) {
+            return false;
+        }
+        foreach ($order->lines as $line) {
+            if ($line->quantity_milli !== ($order->receipt->lines->firstWhere('order_line_id', $line->id)?->quantity_milli)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public function readyForPayment(PurchaseOrder $order): bool
+    {
+        if (! $order->isAdvancePayment()) {
+            return $this->matches($order);
+        }
+        $order->load('lines', 'invoice.lines');
+
+        // A missing invoice is allowed for advance payment; a known discrepancy is not.
+        return ! $order->invoice || $this->invoiceMatches($order);
+    }
+
+    private function invoiceMatches(PurchaseOrder $order): bool
+    {
+        if (! $order->invoice || $order->total_minor !== (int) $order->invoice->total_minor) {
             return false;
         }
         if (! $order->media()->whereKey($order->invoice->media_id)->where('collection_name', 'invoice')->exists()) {
             return false;
         }
         foreach ($order->lines as $line) {
-            if ($line->quantity_milli !== ($order->receipt->lines->firstWhere('order_line_id', $line->id)?->quantity_milli) || $line->quantity_milli !== ($order->invoice->lines->firstWhere('order_line_id', $line->id)?->quantity_milli)) {
+            if ($line->quantity_milli !== ($order->invoice->lines->firstWhere('order_line_id', $line->id)?->quantity_milli)) {
                 return false;
             }
         }
@@ -185,9 +229,6 @@ class PurchasingService
             $q = Amounts::scaled($l['quantity'], 3);
             $line = $order->lines->firstWhere('id', (int) $l['order_line_id']);
             $this->require($line && (! $limited || $q <= $line->quantity_milli), 'كمية الاستلام أكبر من الكمية المعتمدة.');
-            if ($order->category === 'stock') {
-                $this->require($q % 1000 === 0, 'كمية المخزون يجب أن تكون عددًا صحيحًا.');
-            }
             $out[] = ['order_line_id' => $line->id, 'quantity_milli' => $q];
         }
 
@@ -200,7 +241,7 @@ class PurchasingService
 
         return DB::transaction(function () use ($order, $data) {
             $order = $this->locked($order);
-            $this->require(in_array($order->status, [S::Matching, S::Ready]), 'لا يمكن تعديل الاستلام في هذه المرحلة.');
+            $this->require($order->requiresReceipt() && $order->canRecordDocuments(), 'الاستلام غير مطلوب لهذا المصروف أو غير متاح في هذه المرحلة.');
             $lines = $this->quantities($order, $data['lines'], true);
             $receipt = $order->receipt()->with('lines')->first();
             $correction = (bool) $receipt;
@@ -236,7 +277,7 @@ class PurchasingService
 
         return DB::transaction(function () use ($order, $data) {
             $order = $this->locked($order);
-            $this->require(in_array($order->status, [S::Matching, S::Ready]), 'لا يمكن تعديل الفاتورة بعد التحويل.');
+            $this->require($order->canRecordDocuments(), 'لا يمكن تعديل الفاتورة في هذه المرحلة.');
             $this->require($order->media()->whereKey($data['media_id'])->where('collection_name', 'invoice')->exists(), 'ملف الفاتورة لا يخص هذا الطلب.');
             $lines = $this->quantities($order, $data['lines'], false);
             $invoice = $order->invoice()->updateOrCreate([], ['supplier_id' => $order->supplier_id, 'number' => $data['number'], 'date' => $data['date'], 'total_minor' => Amounts::scaled($data['total']), 'media_id' => $data['media_id'], 'created_by' => auth()->id()]);
@@ -257,7 +298,7 @@ class PurchasingService
         return DB::transaction(function () use ($order, $data) {
             $order = $this->locked($order);
             $this->require($order->status === S::Ready && ! $order->payment, 'يجب أن يكون الطلب جاهزًا للتحويل وغير مدفوع.');
-            $this->require($this->matches($order), 'المطابقة لم تعد صحيحة.');
+            $this->require($this->readyForPayment($order), 'المستندات المطلوبة للدفع لم تعد صحيحة.');
             $this->require($order->total_minor === Amounts::scaled($data['amount']), 'قيمة الحوالة تختلف عن إجمالي الطلب.');
             $this->require($order->media()->whereKey($data['media_id'])->where('collection_name', 'proof')->exists(), 'ارفع إثبات تحويل يخص الطلب.');
             $payment = $order->payment()->create(['reference' => $data['reference'], 'date' => $data['date'], 'amount_minor' => $order->total_minor, 'media_id' => $data['media_id'], 'created_by' => auth()->id()]);

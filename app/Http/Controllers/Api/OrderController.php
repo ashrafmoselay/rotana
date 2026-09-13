@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Enums\OrderStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\SaveOrderRequest;
 use App\Models\PurchaseOrder;
@@ -10,6 +11,10 @@ use App\Services\PurchasingService;
 use App\Support\Access;
 use App\Support\Amounts;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
+use Mpdf\Mpdf;
+use Mpdf\Output\Destination;
 use Yajra\DataTables\Facades\DataTables;
 
 class OrderController extends Controller
@@ -70,13 +75,47 @@ class OrderController extends Controller
     {
         Access::allow('orders.view');
         Access::branch($order->branch_id);
-        $order->load('lines.item', 'approvals.user:id,name', 'receipt.lines', 'invoice.lines', 'payment', 'media', 'vehicle', 'creator:id,name');
+        $order->load('lines.item', 'approvals.user:id,name', 'receipt.lines', 'invoice.lines', 'payment', 'media', 'vehicle', 'creator:id,name', 'supplier:id,name,iban', 'maintenanceCard:id,odometer');
         $data = $order->toArray();
         $data['matched'] = $this->service->matches($order);
+        $data['requires_receipt'] = $order->requiresReceipt();
+        $data['can_record_documents'] = $order->canRecordDocuments();
         $data['status_label'] = $order->status->label();
         $data['media'] = $order->media->map(fn ($m) => ['id' => $m->id, 'name' => $m->file_name, 'collection' => $m->collection_name, 'label' => $m->getCustomProperty('label'), 'mime' => $m->mime_type, 'url' => route('media.show', $m->id), 'size' => $m->size]);
 
         return response()->json($data);
+    }
+
+    public function transferPdf(PurchaseOrder $order)
+    {
+        Access::allow('orders.view');
+        Access::branch($order->branch_id);
+
+        return DB::transaction(function () use ($order) {
+            $order = PurchaseOrder::whereKey($order->id)->lockForUpdate()->firstOrFail();
+            Access::branch($order->branch_id);
+            if ($order->status !== OrderStatus::Ready || $order->payment()->exists() || ! $this->service->readyForPayment($order)) {
+                throw ValidationException::withMessages(['order' => 'يمكن تحميل مستند التحويل لطلب جاهز للتحويل وغير مدفوع ومستوفٍ لمتطلبات توقيت الدفع فقط.']);
+            }
+            $order->load(['supplier' => fn ($q) => $q->lockForUpdate(), 'approvals' => fn ($q) => $q->orderBy('id')->with('user:id,name'), 'creator:id,name']);
+            if (! filled($order->supplier?->iban)) {
+                throw ValidationException::withMessages(['order' => 'أكمل رقم الآيبان في بيانات المورد / المستفيد قبل تحميل مستند التحويل.']);
+            }
+
+            $pdf = new Mpdf(['mode' => 'utf-8', 'format' => 'A4', 'default_font' => 'dejavusans', 'default_font_size' => 10,
+                'margin_top' => 12, 'margin_bottom' => 18, 'margin_left' => 12, 'margin_right' => 12,
+                'tempDir' => storage_path('app/private/mpdf')]);
+            $pdf->SetDirectionality('rtl');
+            $pdf->SetTitle('طلب جاهز للتحويل - '.$order->number);
+            $pdf->SetHTMLFooter('<div style="text-align:center;font-size:9pt;color:#64748b">روتانا | صفحة {PAGENO} من {nbpg}</div>');
+            $pdf->WriteHTML(view('orders.transfer-pdf', ['order' => $order, 'generatedAt' => now()])->render());
+
+            return response($pdf->Output('', Destination::STRING_RETURN), 200, [
+                'Content-Type' => 'application/pdf',
+                'Content-Disposition' => 'attachment; filename="order-'.$order->id.'-ready.pdf"',
+                'Cache-Control' => 'private, no-store',
+            ]);
+        });
     }
 
     public function action(Request $r, PurchaseOrder $order, string $action)
