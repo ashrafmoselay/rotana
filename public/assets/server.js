@@ -525,9 +525,10 @@ function nav() {
         { key: 'users', label: 'المستخدمون', icon: 'users-gear', permission: 'users.manage', group: 'admin' },
         { key: 'roles', label: 'الأدوار والصلاحيات', icon: 'user-shield', permission: 'roles.manage', group: 'admin' },
         { key: 'activity', label: 'سجل النشاطات', icon: 'clock-rotate-left', permission: 'activity.view', group: 'admin' },
+        { key: 'settings', label: 'الإعدادات', icon: 'gear', group: 'admin' },
     ];
 
-    const visible = entries.filter(entry => can(entry.permission));
+    const visible = entries.filter(entry => entry.key === 'settings' ? me.can_maintain_system : can(entry.permission));
     let previousGroup = '';
     const markup = visible.map(entry => {
         const group = entry.group || '';
@@ -587,12 +588,27 @@ async function route() {
             case 'users': return users();
             case 'roles': return await roles();
             case 'activity': return activity();
+            case 'settings': return settings();
             default:
                 $('#content').html(head('الصفحة غير موجودة', 'تحقق من العنوان المطلوب ثم حاول مرة أخرى.'));
         }
     } catch (error) {
         $('#content').html(head('تعذر تحميل الصفحة', 'تأكد من صلاحياتك أو من توفر الاتصال بالخادم.'));
     }
+}
+
+let maintenanceRunning = false;
+
+function settings() {
+    if (!me.can_maintain_system) {
+        $('#content').html(head('غير مصرح', 'هذه الصفحة متاحة لمدير النظام فقط.'));
+        return;
+    }
+    $('#content').html(head('الإعدادات', 'صيانة النظام') + `<div class="panel"><h2 class="fs-5">النسخ الاحتياطي واسترجاع البيانات</h2><p>حمّل نسخة SQL من قاعدة البيانات قبل أي عملية حساسة. الاسترجاع يستبدل بيانات قاعدة البيانات بالملف المختار؛ استخدم فقط نسخة موثوقة ومأخوذة من نفس النظام.</p><div class="action-bar"><button type="button" class="btn btn-primary" data-action="database-backup"><i class="fa-solid fa-download"></i> تحميل نسخة SQL</button><button type="button" class="btn btn-danger" data-action="database-restore">استرجاع ملف SQL</button></div></div><div class="panel"><h2 class="fs-5">صيانة النظام</h2><p>تطبيق تحديثات قاعدة البيانات الجديدة (migrations)، ومسح الكاش، وإنشاء رابط storage داخل public إذا لم يكن موجودًا.</p><button type="button" class="btn btn-primary" data-action="system-maintenance" ${maintenanceRunning ? 'disabled' : ''}>مسح الكاش وتحديث قاعدة البيانات وربط التخزين</button><div id="maintenance-results" class="mt-3" role="status" aria-live="polite"></div></div><div class="panel"><h2 class="fs-5 text-danger">مسح بيانات التجربة</h2><p>مسح جميع الطلبات والفواتير والمدفوعات وحركات وأرصدة المخزون وكروت الصيانة والمرفقات والبيانات المرجعية والمستخدمين الآخرين، بما فيها أي بيانات تشغيل فعلية. سيبقى حساب المسؤول الحالي والأدوار والصلاحيات، مع تسجيل عملية المسح. الحذف نهائي؛ تأكد من وجود نسخة احتياطية إذا كنت تحتاج البيانات لاحقًا.</p><button type="button" class="btn btn-danger" data-action="reset-trial-data">مسح كل بيانات التجربة</button></div>`);
+}
+
+function renderMaintenanceResults(response) {
+    $('#maintenance-results').html(`<p>${esc(response?.message || 'تعذر إكمال الصيانة. تحقق من الاتصال قبل إعادة المحاولة.')}</p><ul>${(response?.results || []).map(result => `<li>${esc(result.label)}: ${result.success ? 'تم بنجاح' : 'تعذر التنفيذ'}</li>`).join('')}</ul>`);
 }
 
 function dashboardRecentTable(type, rows) {
@@ -1238,11 +1254,11 @@ function masterFields(kind, record = {}) {
           select('cost_center_id', 'مركز التكلفة', lookup.cost_centers, record.cost_center_id)
         : field('name', 'الاسم', record.name);
 
-    if (['branches', 'warehouses', 'suppliers', 'cost-centers'].includes(kind)) html += field('code', 'الكود', record.code);
+    if (['branches', 'warehouses', 'suppliers', 'cost-centers'].includes(kind) && record.id) html += field('code', 'الكود', record.code, 'text', false, 'readonly');
     if (kind === 'branches') html += select('region_id', 'المنطقة', lookup.regions, record.region_id);
     if (kind === 'warehouses') html += select('branch_id', 'الفرع', lookup.branches, record.branch_id);
     if (kind === 'suppliers') html += field('phone', 'رقم الهاتف', record.phone, 'text', false) + field('email', 'البريد الإلكتروني', record.email, 'email', false) + field('tax_number', 'الرقم الضريبي', record.tax_number, 'text', false) + field('iban', 'آيبان المورد / المستفيد (مطلوب لمستند التحويل)', record.iban, 'text', false, 'dir="ltr"') + textareaField('address', 'العنوان', record.address, false, 3);
-    if (kind === 'items') html += field('sku', 'كود الصنف', record.sku) + field('unit', 'الوحدة', record.unit || 'قطعة') + field('unit_cost', 'تكلفة الوحدة', (record.unit_cost_minor || 0) / 100, 'number') + field('minimum', 'حد إعادة الطلب', (record.minimum_milli || 0) / 1000, 'number') + select('track_stock', 'تتبع المخزون', [{ id: 1, name: 'نعم' }, { id: 0, name: 'لا' }], record.track_stock === false ? 0 : 1);
+    if (kind === 'items') html += (record.id ? field('sku', 'كود الصنف', record.sku, 'text', false, 'readonly') : '') + field('unit', 'الوحدة', record.unit || 'قطعة') + field('unit_cost', 'تكلفة الوحدة', (record.unit_cost_minor || 0) / 100, 'number') + field('minimum', 'حد إعادة الطلب', (record.minimum_milli || 0) / 1000, 'number') + select('track_stock', 'تتبع المخزون', [{ id: 1, name: 'نعم' }, { id: 0, name: 'لا' }], record.track_stock === false ? 0 : 1);
     html += select('active', 'الحالة', [{ id: 1, name: 'نشط' }, { id: 0, name: 'غير نشط' }], record.active === false ? 0 : 1);
 
     return `<div class="form-grid">${html}</div>`;
@@ -1310,7 +1326,6 @@ function masters(kind, focusId = null) {
 function inventoryTable(showMovements, lowStock = false, movementType = '') {
     const panel = $('#inventory-panel');
     panel.data({ showMovements, lowStock, movementType });
-    $('#inventory-export').toggle(showMovements);
     let warehouseId = panel.find('[name=warehouse_id]').val();
     if (!showMovements && !warehouseId) {
         warehouseId = lookup.warehouses[0]?.id;
@@ -1966,6 +1981,93 @@ $(document).on('click', '.remove-line', async function () {
 }).on('click', '[data-action]', async function () {
     const action = this.dataset.action;
     switch (action) {
+        case 'database-backup':
+            if (maintenanceRunning || !me.can_maintain_system) break;
+            window.location.assign('/api/admin/database-backup');
+            break;
+        case 'database-restore': {
+            if (maintenanceRunning || !me.can_maintain_system) break;
+            const result = await Swal.fire({
+                title: 'تأكيد استرجاع النسخة الاحتياطية',
+                html: `<p class="text-danger">سيتم استبدال بيانات قاعدة البيانات الحالية. استخدم ملف SQL موثوقًا فقط.</p><label for="restore-file">ملف SQL (بحد أقصى 200 ميجابايت)</label><input id="restore-file" type="file" class="swal2-file" accept=".sql,application/sql,text/plain"><label for="restore-confirmation">اكتب: استرجاع النسخة الاحتياطية</label><input id="restore-confirmation" class="swal2-input" autocomplete="off"><label for="restore-password">كلمة مرور حسابك</label><input id="restore-password" type="password" class="swal2-input" autocomplete="current-password">`,
+                showCancelButton: true, confirmButtonText: 'استرجاع الآن', cancelButtonText: 'إلغاء', confirmButtonColor: '#dc3545', focusCancel: true,
+                preConfirm: () => {
+                    const file = document.getElementById('restore-file').files[0];
+                    const confirmation = document.getElementById('restore-confirmation').value;
+                    const password = document.getElementById('restore-password').value;
+                    if (!file || confirmation !== 'استرجاع النسخة الاحتياطية' || !password) {
+                        Swal.showValidationMessage('اختر ملف SQL وأدخل عبارة التأكيد وكلمة المرور.');
+                        return false;
+                    }
+                    return { file, confirmation, password };
+                },
+            });
+            if (!result.isConfirmed) break;
+            maintenanceRunning = true;
+            try {
+                const data = new FormData();
+                data.append('file', result.value.file);
+                data.append('confirmation', result.value.confirmation);
+                data.append('password', result.value.password);
+                const response = await $.ajax({ url: '/api/admin/database-restore', method: 'POST', data, processData: false, contentType: false });
+                await Swal.fire({ icon: 'success', title: response.message, confirmButtonText: 'تم' });
+                location.reload();
+            } catch (error) {
+                toastr.error(Object.values(error.responseJSON?.errors || {}).flat().join(' ') || error.responseJSON?.message || 'تعذر استرجاع النسخة الاحتياطية.');
+            } finally {
+                maintenanceRunning = false;
+            }
+            break;
+        }
+        case 'reset-trial-data': {
+            if (maintenanceRunning || !me.can_maintain_system) break;
+            const trigger = $(this).prop('disabled', true);
+            try {
+                const preview = await api('admin/reset-preview');
+                const labels = { purchase_orders: 'طلبات شراء', payments: 'مدفوعات', supplier_invoices: 'فواتير', stock_movements: 'حركات مخزون', stock_balances: 'أرصدة مخزون', maintenance_cards: 'كروت صيانة', media: 'مرفقات', vehicles: 'سيارات', items: 'أصناف', suppliers: 'موردون', warehouses: 'مخازن', branches: 'فروع', regions: 'مناطق', cost_centers: 'مراكز تكلفة', users: 'مستخدمون آخرون' };
+                const result = await Swal.fire({
+                    title: 'تأكيد المسح النهائي',
+                    html: `<p>سيُحذف كل ما يلي والبيانات المرتبطة به، مع الاحتفاظ بحسابك والأدوار والصلاحيات:</p><div style="max-height:180px;overflow:auto"><ul>${Object.entries(labels).map(([key, label]) => `<li>${label}: ${Number(preview.counts[key])}</li>`).join('')}</ul></div><label for="reset-confirmation">اكتب: مسح كل بيانات التجربة</label><input id="reset-confirmation" class="swal2-input" autocomplete="off"><label for="reset-password">كلمة مرور حسابك</label><input id="reset-password" type="password" class="swal2-input" autocomplete="current-password">`,
+                    showCancelButton: true, confirmButtonText: 'مسح نهائي', cancelButtonText: 'إلغاء', confirmButtonColor: '#dc3545', focusCancel: true,
+                    preConfirm: () => {
+                        const confirmation = document.getElementById('reset-confirmation').value;
+                        const password = document.getElementById('reset-password').value;
+                        if (confirmation !== 'مسح كل بيانات التجربة' || !password) {
+                            Swal.showValidationMessage('اكتب عبارة التأكيد كاملة وكلمة مرور حسابك.');
+                            return false;
+                        }
+                        return { confirmation, password, token: preview.token };
+                    },
+                });
+                if (!result.isConfirmed) break;
+                maintenanceRunning = true;
+                const response = await api('admin/reset-data', 'POST', result.value);
+                await Swal.fire({ icon: response.file_cleanup_failures ? 'warning' : 'success', title: response.message, confirmButtonText: 'تم' });
+                location.reload();
+            } catch (error) {
+                toastr.error(Object.values(error.responseJSON?.errors || {}).flat().join(' ') || error.responseJSON?.message || 'تعذر إكمال المسح.');
+            } finally {
+                maintenanceRunning = false;
+                trigger.prop('disabled', false);
+            }
+            break;
+        }
+        case 'system-maintenance':
+            if (maintenanceRunning || !me.can_maintain_system) break;
+            maintenanceRunning = true;
+            $(this).prop('disabled', true);
+            $('#maintenance-results').text('جارٍ تنفيذ الصيانة، يرجى الانتظار...');
+            try {
+                const response = await api('admin/maintenance', 'POST', {});
+                renderMaintenanceResults(response);
+                toastr.success(response.message);
+            } catch (error) {
+                renderMaintenanceResults(error.responseJSON);
+            } finally {
+                maintenanceRunning = false;
+                $('[data-action="system-maintenance"]').prop('disabled', false);
+            }
+            break;
         case 'line-add':
             addLine();
             clearOrderFieldError('lines');
@@ -2073,6 +2175,15 @@ $(document).on('click', '.remove-line', async function () {
             break;
         }
         case 'inventory-export': {
+            const panel = $('#inventory-panel');
+            if (!panel.data('showMovements')) {
+                location.href = '/api/inventory/movements?' + $.param({
+                    warehouse_id: panel.find('[name=warehouse_id]').val() || '',
+                    item_id: panel.find('[name=item_id]').val() || '',
+                    export: 1,
+                });
+                break;
+            }
             const url = new URL(table.ajax.url(), location.origin);
             const params = { ...table.ajax.params(), ...Object.fromEntries(url.searchParams), export: 1 };
             location.href = url.pathname + '?' + $.param(params);

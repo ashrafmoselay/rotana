@@ -604,11 +604,11 @@ class RotanaTest extends TestCase
     public function test_excel_import_rolls_back_all_rows_on_failure(): void
     {
         $before = Item::count();
-        $csv = "sku,name,unit,track_stock,unit_cost,minimum\nNEW-1,Valid,piece,1,12.50,2\nITM-001,Duplicate,piece,1,20,1\n";
+        $csv = "name,unit,track_stock,unit_cost,minimum\nValid,piece,1,12.50,2\nInvalid,piece,1,20,not-a-number\n";
         $file = UploadedFile::fake()->createWithContent('items.csv', $csv);
         $this->postJson('/api/excel/import/items', ['file' => $file])->assertUnprocessable();
         $this->assertEquals($before, Item::count());
-        $this->assertDatabaseMissing('items', ['sku' => 'NEW-1']);
+        $this->assertDatabaseMissing('items', ['name' => 'Valid']);
     }
 
     public function test_excel_export_neutralizes_formula_strings(): void
@@ -697,9 +697,9 @@ class RotanaTest extends TestCase
         $this->assertTrue($u->hasRole('employee'));
         $this->assertFalse($u->mayAccessBranch(2));
         $this->postJson('/api/admin/roles', ['name' => 'custom-reader', 'permissions' => ['orders.view']])->assertCreated();
-        $file = UploadedFile::fake()->createWithContent('items.csv', "sku,name,unit,track_stock,unit_cost,minimum\nNEW-OK,New item,piece,1,12.50,2\n");
+        $file = UploadedFile::fake()->createWithContent('items.csv', "name,unit,track_stock,unit_cost,minimum\nNew item,piece,1,12.50,2\n");
         $this->postJson('/api/excel/import/items', ['file' => $file])->assertOk()->assertJsonPath('rows', 1);
-        $this->assertDatabaseHas('items', ['sku' => 'NEW-OK', 'unit_cost_minor' => 1250]);
+        $this->assertDatabaseHas('items', ['name' => 'New item', 'unit_cost_minor' => 1250]);
     }
 
     public function test_cannot_approve_own_request_without_explicit_permission(): void

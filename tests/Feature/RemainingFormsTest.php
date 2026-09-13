@@ -102,7 +102,7 @@ class RemainingFormsTest extends TestCase
             'track_stock' => true,
             'unit_cost' => '12.345',
             'minimum' => '1.5',
-        ])->assertUnprocessable()->assertJsonValidationErrors(['name', 'sku', 'unit', 'minimum']);
+        ])->assertUnprocessable()->assertJsonValidationErrors(['name', 'unit', 'minimum']);
 
         $item = $this->postJson('/api/masters/items', [
             'name' => 'صنف نموذج المتبقي',
@@ -115,6 +115,8 @@ class RemainingFormsTest extends TestCase
             'created_by' => 999,
         ])->assertCreated();
         $this->assertSame(1235, $item['unit_cost_minor']);
+        $this->assertMatchesRegularExpression('/^ITM-\\d{6}$/', $item['sku']);
+        $this->assertNotSame('FORM-ITEM-1', $item['sku']);
         $this->assertArrayNotHasKey('created_by', $item->json());
 
         $vehicle = Vehicle::where('branch_id', 1)->firstOrFail();
@@ -142,6 +144,39 @@ class RemainingFormsTest extends TestCase
             'cost_center_id' => CostCenter::firstOrFail()->id,
             'active' => true,
         ])->assertForbidden();
+    }
+
+    public function test_master_codes_are_generated_by_the_system_and_cannot_be_edited(): void
+    {
+        $branch = $this->postJson('/api/masters/branches', [
+            'name' => 'فرع تلقائي',
+            'region_id' => 1,
+            'code' => 'MANUAL-BRANCH',
+        ])->assertCreated()->json();
+        $costCenter = $this->postJson('/api/masters/cost-centers', [
+            'name' => 'مركز تلقائي',
+            'code' => 'MANUAL-COST-CENTER',
+        ])->assertCreated()->json();
+        $warehouse = $this->postJson('/api/masters/warehouses', [
+            'name' => 'مخزن تلقائي',
+            'branch_id' => $branch['id'],
+            'code' => 'MANUAL-WAREHOUSE',
+        ])->assertCreated()->json();
+        $supplier = $this->postJson('/api/masters/suppliers', [
+            'name' => 'مورد تلقائي',
+            'code' => 'MANUAL-SUPPLIER',
+        ])->assertCreated()->json();
+
+        foreach ([[$branch, 'BR'], [$costCenter, 'CC'], [$warehouse, 'WH'], [$supplier, 'SUP']] as [$record, $prefix]) {
+            $this->assertMatchesRegularExpression('/^'.$prefix.'-\\d{6}$/', $record['code']);
+            $this->assertStringNotContainsString('MANUAL', $record['code']);
+        }
+
+        $this->putJson('/api/masters/suppliers/'.$supplier['id'], [
+            'name' => $supplier['name'],
+            'code' => 'CHANGED-MANUALLY',
+            'active' => true,
+        ])->assertOk()->assertJsonPath('code', $supplier['code']);
     }
 
     public function test_inventory_movement_forms_validate_access_active_records_transaction_and_duplicate_request_key(): void

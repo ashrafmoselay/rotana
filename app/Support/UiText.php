@@ -102,6 +102,7 @@ final class UiText
         return [
             'auth.login' => 'تسجيل دخول',
             'auth.logout' => 'تسجيل خروج',
+            'system.trial_data_reset' => 'مسح بيانات التجربة بواسطة المسؤول',
             'users.saved' => 'حفظ بيانات مستخدم',
             'roles.saved' => 'حفظ دور وصلاحياته',
             'orders.saved' => 'حفظ طلب شراء',

@@ -25,7 +25,7 @@ Route::middleware(['auth', 'active'])->group(function () {
     Route::delete('/media/{media}', [MediaController::class, 'destroy']);
     Route::patch('/media/{media}', [MediaController::class, 'relabel']);
     Route::prefix('api')->group(function () {
-        Route::get('me', fn () => ['user' => auth()->user()->only('id', 'name', 'email', 'all_branches'), 'permissions' => auth()->user()->getAllPermissions()->pluck('name')]);
+        Route::get('me', fn () => ['user' => auth()->user()->only('id', 'name', 'email', 'all_branches'), 'permissions' => auth()->user()->getAllPermissions()->pluck('name'), 'can_maintain_system' => auth()->user()->hasRole('admin')]);
         Route::get('lookups', [MasterController::class, 'lookups']);
         Route::get('dashboard', DashboardController::class);
         Route::get('dashboard/chart', [DashboardController::class, 'chart']);
@@ -70,6 +70,11 @@ Route::middleware(['auth', 'active'])->group(function () {
         Route::post('admin/roles', [AdminController::class, 'roleSave']);
         Route::put('admin/roles/{role}', [AdminController::class, 'roleSave']);
         Route::get('admin/activity', [AdminController::class, 'activity']);
+        Route::post('admin/maintenance', [AdminController::class, 'maintenance']);
+        Route::get('admin/database-backup', [AdminController::class, 'databaseBackup']);
+        Route::post('admin/database-restore', [AdminController::class, 'restoreDatabase'])->middleware('throttle:5,1');
+        Route::get('admin/reset-preview', [AdminController::class, 'resetPreview']);
+        Route::post('admin/reset-data', [AdminController::class, 'resetData'])->middleware('throttle:5,1');
         Route::get('excel/template/{kind}', [ExcelController::class, 'template']);
         Route::post('excel/import/{kind}',[ExcelController::class, 'import']);
         Route::get('excel/export/{kind}',[ExcelController::class, 'export']);

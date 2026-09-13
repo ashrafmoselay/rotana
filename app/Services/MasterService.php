@@ -14,11 +14,20 @@ use App\Support\Access;
 use App\Support\Amounts;
 use App\Support\Audit;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class MasterService
 {
     public const MODELS = ['regions' => Region::class, 'branches' => Branch::class, 'cost-centers' => CostCenter::class, 'warehouses' => Warehouse::class, 'suppliers' => Supplier::class, 'vehicles' => Vehicle::class, 'items' => Item::class];
+
+    private const AUTO_CODE_FIELDS = [
+        'branches' => ['field' => 'code', 'prefix' => 'BR'],
+        'cost-centers' => ['field' => 'code', 'prefix' => 'CC'],
+        'warehouses' => ['field' => 'code', 'prefix' => 'WH'],
+        'suppliers' => ['field' => 'code', 'prefix' => 'SUP'],
+        'items' => ['field' => 'sku', 'prefix' => 'ITM'],
+    ];
 
     public static function permission(string $kind): string
     {
@@ -44,9 +53,6 @@ class MasterService
             Access::branch($record->id);
         }
         $rules = ['name' => 'required|string|max:190', 'active' => 'sometimes|boolean'];
-        if (in_array($kind, ['branches', 'warehouses', 'suppliers', 'cost-centers'])) {
-            $rules['code'] = ['required', 'string', 'max:50', Rule::unique($record->getTable(), 'code')->ignore($id)];
-        }
         if ($kind === 'regions') {
             $rules['name'] = ['required', 'string', 'max:190', Rule::unique('regions', 'name')->ignore($id)];
         }
@@ -60,7 +66,7 @@ class MasterService
             $rules += ['phone' => 'nullable|string|max:30', 'email' => 'nullable|email|max:190', 'tax_number' => 'nullable|string|max:50', 'iban' => 'nullable|string|max:50', 'address' => 'nullable|string|max:1000'];
         }
         if ($kind === 'items') {
-            $rules += ['sku' => ['required', 'string', 'max:60', Rule::unique('items', 'sku')->ignore($id)], 'unit' => 'required|string|max:30', 'track_stock' => 'required|boolean', 'unit_cost' => 'required|numeric|min:0|max:10000000', 'minimum' => 'required|integer|min:0|max:1000000'];
+            $rules += ['unit' => 'required|string|max:30', 'track_stock' => 'required|boolean', 'unit_cost' => 'required|numeric|min:0|max:10000000', 'minimum' => 'required|integer|min:0|max:1000000'];
         }
         if ($kind === 'vehicles') {
             $input['plate_key'] = self::plate($input['plate'] ?? '');
@@ -86,9 +92,34 @@ class MasterService
         }
         $old = $record->only(array_keys($data));
         $record->fill($data);
+        if (! $record->exists && isset(self::AUTO_CODE_FIELDS[$kind])) {
+            $record->setAttribute(self::AUTO_CODE_FIELDS[$kind]['field'], 'TMP-'.Str::uuid());
+        }
         $record->save();
+        if (isset(self::AUTO_CODE_FIELDS[$kind])) {
+            $code = $this->automaticCode($kind, $record);
+            if ($record->getAttribute(self::AUTO_CODE_FIELDS[$kind]['field']) !== $code) {
+                $record->setAttribute(self::AUTO_CODE_FIELDS[$kind]['field'], $code);
+                $record->save();
+                $data[self::AUTO_CODE_FIELDS[$kind]['field']] = $code;
+            }
+        }
         Audit::record('masters.'.$kind.'.saved', $record, ['branch_id' => $record->branch_id ?? ($kind === 'branches' ? $record->id : null), 'old' => $old, 'new' => $data]);
 
         return $record;
+    }
+
+    private function automaticCode(string $kind, $record): string
+    {
+        $meta = self::AUTO_CODE_FIELDS[$kind];
+        $base = $meta['prefix'].'-'.str_pad((string) $record->getKey(), 6, '0', STR_PAD_LEFT);
+        $code = $base;
+        $suffix = 2;
+
+        while ($record->newQuery()->where($meta['field'], $code)->whereKeyNot($record->getKey())->exists()) {
+            $code = $base.'-'.$suffix++;
+        }
+
+        return $code;
     }
 }

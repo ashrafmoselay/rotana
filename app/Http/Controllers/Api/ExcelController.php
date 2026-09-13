@@ -20,21 +20,22 @@ use Maatwebsite\Excel\Facades\Excel;
 
 class ExcelController extends Controller
 {
-    private const HEADERS = ['items' => ['sku', 'name', 'unit', 'track_stock', 'unit_cost', 'minimum'], 'suppliers' => ['code', 'name', 'phone', 'email', 'tax_number', 'iban', 'address'], 'vehicles' => ['plate', 'vin', 'model', 'year', 'color', 'odometer', 'branch_code', 'cost_center_code']];
+    private const IMPORT_HEADERS = ['items' => ['name', 'unit', 'track_stock', 'unit_cost', 'minimum'], 'suppliers' => ['name', 'phone', 'email', 'tax_number', 'iban', 'address'], 'vehicles' => ['plate', 'vin', 'model', 'year', 'color', 'odometer', 'branch_code', 'cost_center_code']];
+    private const EXPORT_HEADERS = ['items' => ['sku', 'name', 'unit', 'track_stock', 'unit_cost', 'minimum'], 'suppliers' => ['code', 'name', 'phone', 'email', 'tax_number', 'iban', 'address'], 'vehicles' => ['plate', 'vin', 'model', 'year', 'color', 'odometer', 'branch_code', 'cost_center_code']];
 
     public function template(string $kind)
     {
         Access::allow('excel.import');
-        abort_unless(isset(self::HEADERS[$kind]), 404);
+        abort_unless(isset(self::IMPORT_HEADERS[$kind]), 404);
         Access::allow(MasterService::permission($kind));
 
-        return Excel::download(new TableExport(self::HEADERS[$kind], []), $kind.'-template.xlsx');
+        return Excel::download(new TableExport(self::IMPORT_HEADERS[$kind], []), $kind.'-template.xlsx');
     }
 
     public function import(Request $r, string $kind)
     {
         Access::allow('excel.import');
-        abort_unless(isset(self::HEADERS[$kind]), 404);
+        abort_unless(isset(self::IMPORT_HEADERS[$kind]), 404);
         Access::allow(MasterService::permission($kind));
         $r->validate(['file' => 'required|file|mimes:xlsx,xls,csv|max:5120']);
         $import = new MasterImport($kind);
@@ -60,9 +61,9 @@ class ExcelController extends Controller
             abort_if($q->count() > 20000, 422, 'ضيّق نطاق التصدير إلى 20000 طلب أو أقل.');
             $headers = ['رقم الطلب', 'التاريخ', 'النوع', 'الفرع', 'المورد', 'السيارة', 'الإجمالي', 'المدفوع', 'الحالة'];
             $rows = $q->orderBy('id')->get()->map(fn ($o) => [$o->number, $o->date, config('rotana.categories')[$o->category], $o->branch_name, $o->supplier_name, $o->vehicle_plate, Amounts::money($o->total_minor), Amounts::money($o->payment?->amount_minor ?? 0), $o->status->label()]);
-        } elseif (isset(self::HEADERS[$kind])) {
+        } elseif (isset(self::EXPORT_HEADERS[$kind])) {
             Access::allow($kind.'.view');
-            $headers = self::HEADERS[$kind];
+            $headers = self::EXPORT_HEADERS[$kind];
             $q = match ($kind) {
                 'vehicles' => Access::scope(Vehicle::with('branch', 'costCenter')),'suppliers' => Supplier::query(),'items' => Item::query()
             };
