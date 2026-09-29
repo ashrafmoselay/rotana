@@ -44,6 +44,11 @@ class PurchaseOrder extends Model implements HasMedia
         return $this->hasMany(OrderLine::class);
     }
 
+    public function orderVehicles()
+    {
+        return $this->hasMany(PurchaseOrderVehicle::class);
+    }
+
     public function approvals()
     {
         return $this->hasMany(ApprovalEvent::class);

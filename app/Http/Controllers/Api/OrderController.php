@@ -28,12 +28,15 @@ class OrderController extends Controller
             $r->merge(['length' => min(max((int) $r->input('length'), 1), 100)]);
         }
 
-        return DataTables::eloquent($queries->query($r)->with('payment'))
+        return DataTables::eloquent($queries->query($r)->with(['payment', 'orderVehicles.vehicle:id,plate']))
             ->filterColumn('total', fn ($q, $keyword) => $q->where('total_minor', (int) round(((float) $keyword) * 100)))
             ->filterColumn('status_label', fn ($q, $keyword) => $q->where('status', $keyword))
+            ->filterColumn('vehicles', fn ($q, $keyword) => $q->where(fn ($orders) => $orders->where('vehicle_plate', 'like', "%{$keyword}%")->orWhereHas('orderVehicles.vehicle', fn ($vehicles) => $vehicles->where('plate', 'like', "%{$keyword}%"))))
             ->orderColumn('total', 'total_minor $1')
             ->orderColumn('status_label', 'status $1')
             ->addColumn('total', fn ($o) => Amounts::money($o->total_minor))
+            ->addColumn('vehicles', fn ($o) => $o->orderVehicles->pluck('vehicle.plate')->filter()->implode('، ') ?: $o->vehicle_plate)
+            ->addColumn('vehicles_count', fn ($o) => $o->orderVehicles->count() ?: ($o->vehicle_id ? 1 : 0))
             ->addColumn('paid', fn ($o) => Amounts::money($o->payment?->amount_minor ?? 0))
             ->addColumn('status_label', fn ($o) => $o->status->label())
             ->escapeColumns([])
@@ -75,13 +78,13 @@ class OrderController extends Controller
     {
         Access::allow('orders.view');
         Access::branch($order->branch_id);
-        $order->load('lines.item', 'approvals.user:id,name', 'receipt.lines', 'invoice.lines', 'payment', 'media', 'vehicle', 'creator:id,name', 'supplier:id,name,iban', 'maintenanceCard:id,odometer');
+        $order->load('lines.item', 'lines.vehicle:id,plate,model', 'orderVehicles.vehicle:id,plate,model,year,color', 'orderVehicles.maintenanceCard:id,number,odometer', 'approvals.user:id,name', 'receipt.lines', 'invoice.lines', 'payment', 'media', 'vehicle', 'creator:id,name', 'supplier:id,name,iban', 'maintenanceCard:id,odometer');
         $data = $order->toArray();
         $data['matched'] = $this->service->matches($order);
         $data['requires_receipt'] = $order->requiresReceipt();
         $data['can_record_documents'] = $order->canRecordDocuments();
         $data['status_label'] = $order->status->label();
-        $data['media'] = $order->media->map(fn ($m) => ['id' => $m->id, 'name' => $m->file_name, 'collection' => $m->collection_name, 'label' => $m->getCustomProperty('label'), 'mime' => $m->mime_type, 'url' => route('media.show', $m->id), 'size' => $m->size]);
+        $data['media'] = $order->media->map(fn ($m) => ['id' => $m->id, 'name' => $m->file_name, 'collection' => $m->collection_name, 'label' => $m->getCustomProperty('label'), 'vehicle_id' => $m->getCustomProperty('vehicle_id'), 'mime' => $m->mime_type, 'url' => route('media.show', $m->id), 'size' => $m->size]);
 
         return response()->json($data);
     }

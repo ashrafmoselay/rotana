@@ -102,7 +102,7 @@ class RemainingFormsTest extends TestCase
             'track_stock' => true,
             'unit_cost' => '12.345',
             'minimum' => '1.5',
-        ])->assertUnprocessable()->assertJsonValidationErrors(['name', 'unit', 'minimum']);
+        ])->assertUnprocessable()->assertJsonValidationErrors(['name', 'sku', 'unit', 'minimum']);
 
         $item = $this->postJson('/api/masters/items', [
             'name' => 'صنف نموذج المتبقي',
@@ -115,8 +115,7 @@ class RemainingFormsTest extends TestCase
             'created_by' => 999,
         ])->assertCreated();
         $this->assertSame(1235, $item['unit_cost_minor']);
-        $this->assertMatchesRegularExpression('/^ITM-\\d{6}$/', $item['sku']);
-        $this->assertNotSame('FORM-ITEM-1', $item['sku']);
+        $this->assertSame('FORM-ITEM-1', $item['sku']);
         $this->assertArrayNotHasKey('created_by', $item->json());
 
         $vehicle = Vehicle::where('branch_id', 1)->firstOrFail();
@@ -177,6 +176,30 @@ class RemainingFormsTest extends TestCase
             'code' => 'CHANGED-MANUALLY',
             'active' => true,
         ])->assertOk()->assertJsonPath('code', $supplier['code']);
+    }
+
+    public function test_item_sku_is_manual_and_must_be_unique_on_create_and_update(): void
+    {
+        $item = Item::firstOrFail();
+        $this->postJson('/api/masters/items', [
+            'name' => 'صنف بكود مكرر',
+            'sku' => $item->sku,
+            'unit' => 'قطعة',
+            'track_stock' => true,
+            'unit_cost' => 1,
+            'minimum' => 0,
+        ])->assertUnprocessable()->assertJsonValidationErrors('sku');
+
+        $other = Item::whereKeyNot($item->id)->firstOrFail();
+        $this->putJson('/api/masters/items/'.$other->id, [
+            'name' => $other->name,
+            'sku' => $item->sku,
+            'unit' => $other->unit,
+            'track_stock' => $other->track_stock,
+            'unit_cost' => $other->unit_cost_minor / 100,
+            'minimum' => $other->minimum_milli / 1000,
+            'active' => $other->active,
+        ])->assertUnprocessable()->assertJsonValidationErrors('sku');
     }
 
     public function test_inventory_movement_forms_validate_access_active_records_transaction_and_duplicate_request_key(): void

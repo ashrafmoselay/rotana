@@ -26,7 +26,6 @@ class MasterService
         'cost-centers' => ['field' => 'code', 'prefix' => 'CC'],
         'warehouses' => ['field' => 'code', 'prefix' => 'WH'],
         'suppliers' => ['field' => 'code', 'prefix' => 'SUP'],
-        'items' => ['field' => 'sku', 'prefix' => 'ITM'],
     ];
 
     public static function permission(string $kind): string
@@ -66,7 +65,7 @@ class MasterService
             $rules += ['phone' => 'nullable|string|max:30', 'email' => 'nullable|email|max:190', 'tax_number' => 'nullable|string|max:50', 'iban' => 'nullable|string|max:50', 'address' => 'nullable|string|max:1000'];
         }
         if ($kind === 'items') {
-            $rules += ['unit' => 'required|string|max:30', 'track_stock' => 'required|boolean', 'unit_cost' => 'required|numeric|min:0|max:10000000', 'minimum' => 'required|integer|min:0|max:1000000'];
+            $rules += ['sku' => ['required', 'string', 'max:60', Rule::unique('items', 'sku')->ignore($id)], 'unit' => 'required|string|max:30', 'track_stock' => 'required|boolean', 'unit_cost' => 'required|numeric|min:0|max:10000000', 'minimum' => 'required|integer|min:0|max:1000000'];
         }
         if ($kind === 'vehicles') {
             $input['plate_key'] = self::plate($input['plate'] ?? '');

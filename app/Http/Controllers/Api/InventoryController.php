@@ -78,6 +78,7 @@ class InventoryController extends Controller
             $q->whereHas('lines', fn ($q) => $q->where('item_id', $r->integer('item_id')))
                 ->with(['lines' => fn ($q) => $q->where('item_id', $r->integer('item_id'))->with('item')]);
         }
+        $this->applyMovementDateFilters($q, $r);
 
         $table = DataTables::eloquent($q)->escapeColumns([]);
         if ($r->boolean('export')) {
@@ -109,6 +110,48 @@ class InventoryController extends Controller
         return $table->toJson();
     }
 
+    public function itemCard(Request $r)
+    {
+        Access::allow('inventory.view');
+        $data = $r->validate([
+            'warehouse_id' => 'required|integer|exists:warehouses,id',
+            'item_id' => 'required|integer|exists:items,id',
+            'date_from' => 'nullable|date_format:Y-m-d',
+            'date_to' => 'nullable|date_format:Y-m-d|after_or_equal:date_from',
+        ]);
+
+        $warehouse = Warehouse::findOrFail($data['warehouse_id']);
+        Access::branch($warehouse->branch_id);
+        $item = Item::where('track_stock', true)->findOrFail($data['item_id']);
+
+        $lines = StockMovementLine::query()
+            ->join('stock_movements', 'stock_movements.id', '=', 'stock_movement_lines.stock_movement_id')
+            ->where('stock_movement_lines.item_id', $item->id)
+            ->where(fn ($q) => $q->where('stock_movements.warehouse_id', $warehouse->id)
+                ->orWhere('stock_movements.destination_warehouse_id', $warehouse->id));
+        if (! empty($data['date_from'])) $lines->whereDate('stock_movements.date', '>=', $data['date_from']);
+        if (! empty($data['date_to'])) $lines->whereDate('stock_movements.date', '<=', $data['date_to']);
+
+        $summary = $lines->selectRaw(
+            'COALESCE(SUM(CASE
+                WHEN stock_movements.destination_warehouse_id = ? THEN ABS(stock_movement_lines.quantity_milli)
+                WHEN stock_movements.warehouse_id = ? AND stock_movement_lines.quantity_milli > 0 THEN stock_movement_lines.quantity_milli
+                ELSE 0 END), 0) as incoming_milli,
+             COALESCE(SUM(CASE
+                WHEN stock_movements.warehouse_id = ? AND stock_movement_lines.quantity_milli < 0 THEN ABS(stock_movement_lines.quantity_milli)
+                ELSE 0 END), 0) as outgoing_milli',
+            [$warehouse->id, $warehouse->id, $warehouse->id]
+        )->first();
+
+        return response()->json([
+            'item' => $item->only(['id', 'sku', 'name', 'unit', 'minimum_milli']),
+            'warehouse' => $warehouse->only(['id', 'name']),
+            'quantity_milli' => StockBalance::where('warehouse_id', $warehouse->id)->where('item_id', $item->id)->value('quantity_milli') ?? 0,
+            'incoming_milli' => (int) $summary->incoming_milli,
+            'outgoing_milli' => (int) $summary->outgoing_milli,
+        ]);
+    }
+
     public function items(Request $r)
     {
         Access::allow('inventory.view');
@@ -116,9 +159,16 @@ class InventoryController extends Controller
         Access::branch($w->branch_id);
         $movements = StockMovement::where('warehouse_id', $w->id)->orWhere('destination_warehouse_id', $w->id)->select('id');
 
-        return Item::where(fn ($q) => $q->whereHas('balances', fn ($q) => $q->where('warehouse_id', $w->id))
-            ->orWhereIn('id', StockMovementLine::whereIn('stock_movement_id', $movements)->select('item_id')))
-            ->orderBy('name')->get(['id', 'sku', 'name']);
+        $items = Item::query();
+        if ($r->boolean('available')) {
+            $items->where('track_stock', true)->where('active', true)
+                ->whereHas('balances', fn ($q) => $q->where('warehouse_id', $w->id)->where('quantity_milli', '>', 0));
+        } else {
+            $items->where(fn ($q) => $q->whereHas('balances', fn ($q) => $q->where('warehouse_id', $w->id))
+                ->orWhereIn('id', StockMovementLine::whereIn('stock_movement_id', $movements)->select('item_id')));
+        }
+
+        return $items->orderBy('name')->get(['id', 'sku', 'name']);
     }
 
     public function store(Request $r, InventoryService $service)
@@ -133,5 +183,15 @@ class InventoryController extends Controller
         if ($r->has('length')) {
             $r->merge(['length' => min(max((int) $r->input('length'), 1), 100)]);
         }
+    }
+
+    private function applyMovementDateFilters($query, Request $r): void
+    {
+        $r->validate([
+            'date_from' => 'nullable|date_format:Y-m-d',
+            'date_to' => 'nullable|date_format:Y-m-d|after_or_equal:date_from',
+        ]);
+        if ($r->filled('date_from')) $query->whereDate('date', '>=', $r->input('date_from'));
+        if ($r->filled('date_to')) $query->whereDate('date', '<=', $r->input('date_to'));
     }
 }

@@ -13,7 +13,12 @@ class OrderQueries
         $q = Access::scope(PurchaseOrder::query());
         foreach (['status', 'vehicle_id', 'supplier_id', 'category', 'branch_id'] as $f) {
             if (! in_array($f, $except, true) && $r->filled($f)) {
-                $q->where($f, $r->input($f));
+                if ($f === 'vehicle_id') {
+                    $vehicleId = $r->integer('vehicle_id');
+                    $q->where(fn ($query) => $query->where('vehicle_id', $vehicleId)->orWhereHas('orderVehicles', fn ($vehicles) => $vehicles->where('vehicle_id', $vehicleId)));
+                } else {
+                    $q->where($f, $r->input($f));
+                }
             }
         }
         if ($r->boolean('open')) {

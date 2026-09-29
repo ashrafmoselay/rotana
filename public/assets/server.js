@@ -584,6 +584,7 @@ async function route() {
             case 'reports': return orders(true);
             case 'vehicle-log': return vehicleLog(routeParams);
             case 'inventory': return inventory(routeParams);
+            case 'inventory-card': return await inventoryCard(routeParams);
             case 'cards': return cards(routeParams);
             case 'users': return users();
             case 'roles': return await roles();
@@ -772,7 +773,13 @@ function orders(report = false, category = '', status = '', open = false) {
         col('category', 'نوع الطلب', { className: 'po-category', render: (value, type) => type === 'display' ? esc(lookup.categories?.[value] || value) : value }),
         col('branch_name', 'الفرع'),
         col('supplier_name', 'المورد'),
-        col('vehicle_plate', 'السيارة', { className: 'po-code', render: value => value ? bdi(value) : '—' }),
+        col('vehicles', 'السيارات', { className: 'po-vehicles-cell', orderable: false, render: (value, type, row) => {
+            const plates = String(value || '').split('،').map(plate => plate.trim()).filter(Boolean);
+            if (type !== 'display') return plates.join('، ');
+            if (!plates.length) return '—';
+            const count = Number(row.vehicles_count || plates.length);
+            return `<div class="po-vehicles-display"><span class="po-vehicles-count"><i class="fa-solid fa-car-side"></i>${count}</span><div class="po-vehicles-plates">${plates.map(plate => `<bdi>${esc(plate)}</bdi>`).join('')}</div></div>`;
+        } }),
         col('total', 'الإجمالي', { name: 'total', className: 'po-money', render: value => bdi(value) }),
         col('status_label', 'الحالة', { name: 'status_label', className: 'po-status-cell', render: (value, type, row) => type === 'display' ? `<span class="badge po-status po-status-${esc(row.status)}">${esc(value)}</span>` : value }),
         { data: 'id', title: 'التفاصيل', className: 'po-actions', orderable: false, searchable: false, render: (id, type, row) => `<a class="btn btn-light po-action" href="#order/${Number(id)}" title="عرض تفاصيل ${esc(row.number)}" aria-label="عرض تفاصيل الطلب ${esc(row.number)}"><i class="fa-solid fa-eye"></i><span>عرض</span></a>${transferPdfButton(row)}` },
@@ -937,10 +944,52 @@ function poLineFieldError(index, fieldName) {
 
 function reindexOrderLineErrors() {
     $('#lines tr').each(function (index) {
-        ['item_id', 'quantity', 'unit_price'].forEach(fieldName => {
+        ['item_id', 'vehicle_id', 'quantity', 'unit_price'].forEach(fieldName => {
             $(this).find(`[data-error-for$=".${fieldName}"]`).attr('data-error-for', `lines.${index}.${fieldName}`);
         });
     });
+}
+
+function orderVehicleOptions(value = '') {
+    const vehicles = $('#order-vehicles .po-vehicle-row').map(function () {
+        const id = $(this).find('[name=vehicle_id]').val();
+        const label = $(this).find('[name=vehicle_id] option:selected').text().trim();
+        return id ? { id, name: label } : null;
+    }).get().filter(Boolean);
+    return `<option value="">اختر سيارة الطلب</option>${vehicles.map(vehicle => `<option value="${esc(vehicle.id)}" ${String(vehicle.id) === String(value) ? 'selected' : ''}>${esc(vehicle.name)}</option>`).join('')}`;
+}
+
+function refreshLineVehicleOptions() {
+    $('#lines tr').each(function () {
+        const select = $(this).find('[name=vehicle_id]');
+        if (!select.length) return;
+        const selected = select.val();
+        select.html(orderVehicleOptions(selected));
+        if (!select.val()) select.val($('#order-vehicles .po-vehicle-row:first [name=vehicle_id]').val() || '');
+        select.trigger('change.select2');
+    });
+}
+
+function addOrderVehicle(vehicle = {}) {
+    const index = $('#order-vehicles .po-vehicle-row').length;
+    const fieldId = `order-vehicle-${index}`;
+    const row = $(`<div class="po-vehicle-row" data-vehicle-index="${index}">
+        <div class="po-vehicle-row-title"><span><i class="fa-solid fa-car-side"></i> سيارة <b>${index + 1}</b></span><button type="button" class="btn btn-light remove-order-vehicle" data-action="order-vehicle-remove" aria-label="حذف السيارة"><i class="fa-solid fa-trash"></i></button></div>
+        <div class="po-vehicle-fields">
+            ${poSelect('vehicle_id', 'السيارة', lookup.vehicles, vehicle.vehicle_id, 'vehicles').replaceAll('f-vehicle_id', `f-${fieldId}-vehicle_id`)}
+            ${poField('odometer', 'قراءة العداد', vehicle.odometer ?? '', 'text', true, 'inputmode="numeric" pattern="[0-9]{1,9}"').replaceAll('f-odometer', `f-${fieldId}-odometer`)}
+            ${poField('maintenance_card_id', 'كارت الصيانة', vehicle.maintenance_card_id || '', 'number', false).replaceAll('f-maintenance_card_id', `f-${fieldId}-maintenance_card_id`)}
+        </div>
+    </div>`);
+    $('#order-vehicles').append(row);
+    enhance(row);
+    row.find('[name=vehicle_id]').on('change', function () {
+        const selected = lookup.vehicles.find(item => String(item.id) === String(this.value));
+        if (!row.find('[name=odometer]').val()) row.find('[name=odometer]').val(selected?.odometer ?? '');
+        refreshLineVehicleOptions();
+    });
+    row.find('[name=vehicle_id]').trigger('change');
+    refreshLineVehicleOptions();
 }
 
 function poLineTotal(row) {
@@ -1017,6 +1066,7 @@ function addLine(line = {}) {
     const row = $(`
         <tr class="po-line-row">
             <td data-label="الصنف">${poSelect('item_id', 'الصنف', lookup.items, line.item_id, 'items')}${poLineFieldError(index, 'item_id')}</td>
+            <td data-label="السيارة" class="po-line-vehicle"><select aria-label="السيارة المستفيدة" name="vehicle_id" class="form-select searchable" required>${orderVehicleOptions(line.vehicle_id)}</select>${poLineFieldError(index, 'vehicle_id')}</td>
             <td data-label="الوصف"><span class="po-line-description">—</span></td>
             <td data-label="الكمية"><input aria-label="الكمية" name="quantity" class="form-control" type="text" inputmode="decimal" pattern="[0-9]+([.][0-9]{1,3})?" required value="${line.quantity_milli ? line.quantity_milli / 1000 : 1}">${poLineFieldError(index, 'quantity')}</td>
             <td data-label="سعر الوحدة"><input aria-label="سعر الوحدة" name="unit_price" class="form-control" type="number" min="0" step="0.01" required value="${line.unit_price_minor ? line.unit_price_minor / 100 : 0}">${poLineFieldError(index, 'unit_price')}</td>
@@ -1035,10 +1085,12 @@ function refreshOrderCategory() {
     const category = form.find('[name=category]').val();
     const vehicleOrder = ['maintenance', 'damage', 'parts', 'quotes'].includes(category);
     const expense = ['utilities', 'branches'].includes(category);
-    [['vehicle_id', vehicleOrder, true], ['odometer', vehicleOrder, true], ['maintenance_card_id', vehicleOrder, false], ['warehouse_id', category === 'stock', true], ['quote_number', !expense, false]].forEach(([name, visible, required]) => {
+    [['warehouse_id', category === 'stock', true], ['quote_number', !expense, false]].forEach(([name, visible, required]) => {
         const input = form.find(`[name=${name}]`);
         input.prop('disabled', !visible).prop('required', visible && required).closest('.field').toggle(visible);
     });
+    form.find('.po-vehicles-panel, .po-line-vehicle').toggle(vehicleOrder);
+    form.find('#lines [name=vehicle_id]').prop('required', vehicleOrder).prop('disabled', !vehicleOrder);
     const timing = form.find('[name=payment_timing]');
     timing.find('option[value=after_receipt]').replaceWith(new Option(expense ? 'بعد الفاتورة' : 'بعد الاستلام والفاتورة', 'after_receipt', false, timing.val() === 'after_receipt'));
     timing.trigger('change.select2');
@@ -1065,18 +1117,20 @@ function orderForm(order = null, category = '') {
                     ${poSelect('branch_id', 'الفرع', lookup.branches, order?.branch_id, 'branches')}
                     ${poSelect('cost_center_id', 'مركز التكلفة', lookup.cost_centers, order?.cost_center_id, 'cost-centers')}
                     ${poSelect('supplier_id', 'المورد', lookup.suppliers, order?.supplier_id, 'suppliers')}
-                    ${poSelect('vehicle_id', 'السيارة', lookup.vehicles, order?.vehicle_id, 'vehicles')}
                     ${poSelect('warehouse_id', 'مخزن التوريد', lookup.warehouses, order?.warehouse_id, 'warehouses')}
-                    ${poField('maintenance_card_id', 'رقم كارت الصيانة الداخلي', order?.maintenance_card_id || '', 'number', false)}
-                    ${poField('odometer', 'قراءة عداد السيارة وقت الطلب', order?.odometer ?? order?.maintenance_card?.odometer ?? '', 'text', true, 'inputmode="numeric" pattern="[0-9]{1,9}"')}
                     ${poSelect('payment_timing', 'توقيت الدفع', [{ id: 'after_receipt', name: 'بعد الاستلام والفاتورة' }, { id: 'before_receipt', name: 'دفع مقدم قبل الاستلام أو الفاتورة' }], order?.payment_timing || 'after_receipt')}
                 </div>
+            </section>
+            <section class="panel po-form-panel po-vehicles-panel">
+                <h2 class="section-title"><span><i class="fa-solid fa-car-side"></i>السيارات المرتبطة بالطلب</span>${button('إضافة سيارة', 'order-vehicle-add', 'plus')}</h2>
+                <p class="po-section-help">أضف السيارات أولًا، ثم اربط كل بند بالسيارة المستفيدة منه. تُحفظ قراءة العداد وكارت الصيانة بشكل مستقل لكل سيارة.</p>
+                <div id="order-vehicles" class="po-vehicles-grid"></div>
             </section>
             <section class="panel po-form-panel">
                 <h2 class="section-title"><span><i class="fa-solid fa-list-check"></i>بنود الطلب</span>${button('إضافة بند', 'line-add')}</h2>
                 <div class="table-responsive po-lines-wrap">
                     <table class="table po-lines-table">
-                        <thead><tr><th>الصنف</th><th>الوصف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th><th>إجراء</th></tr></thead>
+                        <thead><tr><th>الصنف</th><th class="po-line-vehicle">السيارة المستفيدة</th><th>الوصف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th><th>إجراء</th></tr></thead>
                         <tbody id="lines"></tbody>
                     </table>
                 </div>
@@ -1099,14 +1153,11 @@ function orderForm(order = null, category = '') {
     );
 
     enhance();
+    const savedVehicles = order?.order_vehicles?.length ? order.order_vehicles.map(row => ({ vehicle_id: row.vehicle_id, maintenance_card_id: row.maintenance_card_id, odometer: row.odometer })) : (order?.vehicle_id ? [{ vehicle_id: order.vehicle_id, maintenance_card_id: order.maintenance_card_id, odometer: order.odometer ?? order?.maintenance_card?.odometer }] : [{}]);
+    savedVehicles.forEach(addOrderVehicle);
     (order?.lines || [{}]).forEach(addLine);
     refreshOrderTotals();
     refreshOrderCategory();
-    $('#order-form [name=vehicle_id]').on('change', function () {
-        const vehicle = lookup.vehicles.find(vehicle => String(vehicle.id) === String(this.value));
-        $('#order-form [name=odometer]').val(vehicle?.odometer ?? '');
-    });
-    if (order?.odometer == null && !order?.maintenance_card) $('#order-form [name=vehicle_id]').trigger('change');
     $('#order-form [name=category]').on('change', refreshOrderCategory);
     $('#order-form').on('input change', 'input, textarea, select', function () {
         const row = $(this).closest('tr');
@@ -1123,10 +1174,22 @@ function orderForm(order = null, category = '') {
         reindexOrderLineErrors();
         const data = formData(this);
         data.tax_percent = $(this).find('[name=tax_percent]').is(':checked') ? '15' : '0';
-        ['vehicle_id', 'warehouse_id', 'maintenance_card_id', 'quote_number', 'odometer'].forEach(key => data[key] = data[key] || null);
+        ['warehouse_id', 'quote_number'].forEach(key => data[key] = data[key] || null);
+        delete data.vehicle_id;
+        delete data.odometer;
+        delete data.maintenance_card_id;
+        const vehicleOrder = ['maintenance', 'damage', 'parts', 'quotes'].includes(data.category);
+        data.vehicles = vehicleOrder ? $('#order-vehicles .po-vehicle-row').map(function () {
+            return {
+                vehicle_id: $(this).find('[name=vehicle_id]').val(),
+                odometer: $(this).find('[name=odometer]').val() || null,
+                maintenance_card_id: $(this).find('[name=maintenance_card_id]').val() || null,
+            };
+        }).get() : [];
         data.lines = $('#lines tr').map(function () {
             return {
                 item_id: $(this).find('[name=item_id]').val(),
+                vehicle_id: $(this).find('[name=vehicle_id]').val() || null,
                 quantity: $(this).find('[name=quantity]').val(),
                 unit_price: $(this).find('[name=unit_price]').val(),
             };
@@ -1186,27 +1249,35 @@ async function detail(id) {
     const vehiclePhotos = mediaBy('photos_before').reverse();
     const quote = mediaBy('quote')[0];
     const expenseDocuments = [...mediaBy('attachments'), ...mediaBy('quote')];
+    const orderVehicles = order.order_vehicles?.length ? order.order_vehicles : (order.vehicle_id ? [{ vehicle: order.vehicle, vehicle_id: order.vehicle_id, odometer: order.odometer, maintenance_card_id: order.maintenance_card_id }] : []);
     const metadata = [
         ['رقم الطلب', bdi(order.number)], ['نوع الطلب', esc(lookup.categories[order.category])], ['المنطقة', esc(order.region_name || '—')], ['المورد', esc(order.supplier_name)],
         ['المستفيد', esc(order.supplier?.name || order.supplier_name)], ['حساب المستفيد (الآيبان)', order.supplier?.iban ? bdi(order.supplier.iban) : `<span class="text-warning">أكمل الآيبان من بيانات المورد قبل تحميل PDF.</span>${can('suppliers.manage') ? `<a href="#master/suppliers/${Number(order.supplier_id)}">تعديل بيانات المستفيد</a>` : ''}`],
         ['مركز التكلفة', esc(lookup.cost_centers.find(row => String(row.id) === String(order.cost_center_id))?.name || '—')], ['تاريخ الطلب', bdi(order.date)], ...(!expense ? [['رقم عرض السعر', bdi(order.quote_number || '—')]] : []), ['توقيت الدفع', advancePayment ? 'دفع مقدم قبل الاستلام أو الفاتورة' : (expense ? 'بعد الفاتورة' : 'بعد الاستلام والفاتورة')],
-        ...(order.vehicle_id ? [['السيارة', bdi(order.vehicle_plate)], ['قراءة العداد وقت الطلب', bdi(order.odometer ?? order.maintenance_card?.odometer ?? 'غير مسجل')], ['كارت الصيانة', bdi(order.maintenance_card_id || 'غير مرتبط بكارت')]] : []), ['المبلغ الإجمالي', money(order.total_minor)],
+        ...(orderVehicles.length ? [['السيارات المرتبطة', bdi(orderVehicles.map(row => row.vehicle?.plate || order.vehicle_plate || row.vehicle_id).join('، '))], ['قراءات العداد', bdi(orderVehicles.map(row => row.odometer ?? row.maintenance_card?.odometer ?? 'غير مسجل').join('، '))]] : []), ['المبلغ الإجمالي', money(order.total_minor)],
     ];
-    const indicators = [...(order.vehicle_id ? [['صور السيارة', vehiclePhotos.length, 'car-side']] : []), ['المرفقات', order.media.length, 'paperclip'], ...(order.requires_receipt ? [['الاستلام', order.receipt ? 1 : 0, 'cart-flatbed']] : []), ['فاتورة المورد', order.invoice ? 1 : 0, 'file-invoice'], ['الحوالة', order.payment ? 1 : 0, 'building-columns']];
+    const indicators = [...(orderVehicles.length ? [['صور السيارة', vehiclePhotos.length, 'car-side']] : []), ['المرفقات', order.media.length, 'paperclip'], ...(order.requires_receipt ? [['الاستلام', order.receipt ? 1 : 0, 'cart-flatbed']] : []), ['فاتورة المورد', order.invoice ? 1 : 0, 'file-invoice'], ['الحوالة', order.payment ? 1 : 0, 'building-columns']];
     const renderPhoto = media => `<div class="vehicle-photo-card"><a class="order-photo" href="${esc(media.url)}" data-gallery-id="${media.id}"><img src="${esc(media.url)}" alt="${esc(lookup.photo_labels[media.label] || 'صورة السيارة')}"><span>${esc(lookup.photo_labels[media.label] || 'صورة')}</span></a>${can('orders.update') && (media.collection === 'photos_after' ? order.can_record_documents : order.status === 'draft') ? `<div class="vehicle-photo-tools"><button type="button" class="btn btn-light" data-action="relabel-photo" data-id="${media.id}" title="تغيير زاوية الصورة"><i class="fa-solid fa-arrows-rotate"></i>تعيين الزاوية</button><button type="button" class="btn btn-light text-danger" data-action="delete-media" data-id="${media.id}" title="حذف الصورة"><i class="fa-solid fa-trash"></i>حذف</button></div>` : ''}</div>`;
     const detailActions = can('media.upload') && (!['paid', 'closed', 'rejected'].includes(order.status) || order.can_record_documents) ? button('رفع ملف أو تصوير', 'upload', 'camera') : '';
+    const quoteNumberEditor = !expense && order.status === 'draft' && can('orders.update') ? `<div class="mt-3 d-flex gap-2 align-items-end flex-wrap"><div class="field flex-grow-1"><label for="order-quote-number">رقم عرض السعر</label><input id="order-quote-number" class="form-control" maxlength="100" value="${esc(order.quote_number || '')}" placeholder="أدخل رقم عرض السعر"></div>${button('حفظ الرقم', 'save-quote-number', 'floppy-disk')}</div>` : '';
+    const vehiclePhotoGroups = orderVehicles.map(vehicleRow => {
+        const vehicleId = vehicleRow.vehicle_id;
+        const photos = vehiclePhotos.filter(media => String(media.vehicle_id || (orderVehicles.length === 1 ? vehicleId : '')) === String(vehicleId));
+        const vehicleName = vehicleRow.vehicle?.plate || `سيارة #${vehicleId}`;
+        return `<section class="order-vehicle-photo-group"><h3><span><i class="fa-solid fa-car-side"></i>${bdi(vehicleName)}</span><b>${new Set(photos.map(media => media.label)).size}/9</b>${can('media.upload') && can('orders.update') && (order.status === 'draft' || order.can_record_documents) ? button('إضافة الصور', 'vehicle-upload', 'images', `data-vehicle-id="${vehicleId}"`) : ''}</h3><div class="vehicle-photo-grid">${Object.entries(lookup.photo_labels).map(([label, name]) => { const media = photos.find(photo => photo.label === label); return media ? renderPhoto(media) : `<div class="vehicle-empty"><i class="fa-solid fa-${photoIcon(label)}"></i><b>${esc(name)}</b><small>لم تُضف صورة</small></div>`; }).join('')}</div></section>`;
+    }).join('');
 
     $('#content').html(
         head(order.number, `${lookup.categories[order.category]} · ${order.branch_name} · ${order.date}`, actions) +
         workflowSteps(order.status, advancePayment) +
         `<section class="order-overview panel"><div class="order-metadata">${metadata.map(([label, value]) => `<div><small>${label}</small><strong>${value}</strong></div>`).join('')}</div><div class="order-status-pill"><small>الحالة</small><b>${esc(statusLabel(order.status))}</b></div></section>
-        <section class="order-indicators${order.vehicle_id ? '' : ' no-vehicle'}">${indicators.map(([label, count, icon]) => `<div><i class="fa-solid fa-${icon}"></i><span>${label}</span><b>${Number(count).toLocaleString('ar-SA')}</b></div>`).join('')}</section>
-        <section class="order-detail-layout${order.vehicle_id ? '' : ' no-vehicle'}"><aside class="panel order-approval-column">${orderTimeline(order)}</aside><div class="order-main-column"><section class="panel order-quote-card"><h2 class="section-title"><span><i class="fa-solid fa-file-lines"></i> ${expense ? 'مستندات المصروف / الخدمة' : 'عرض السعر'}</span>${detailActions}</h2>${expense ? (expenseDocuments.length ? expenseDocuments.map(media => `<a class="quote-file" href="${esc(media.url)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-lines"></i><span>${esc(media.name)}</span></a>`).join('') : '<div class="empty-inline">أرفق فاتورة الخدمة أو مستند المصروف قبل الإرسال.</div>') : (quote ? `<a class="quote-file" href="${esc(quote.url)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-pdf"></i><span><b>${bdi(quote.name)}</b><small>رقم العرض: ${bdi(order.quote_number)}</small></span><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '<div class="empty-inline">لم يُرفع عرض سعر بعد.</div>')}</section><section class="panel order-lines-card">
+        <section class="order-indicators${orderVehicles.length ? '' : ' no-vehicle'}">${indicators.map(([label, count, icon]) => `<div><i class="fa-solid fa-${icon}"></i><span>${label}</span><b>${Number(count).toLocaleString('ar-SA')}</b></div>`).join('')}</section>
+        <section class="order-detail-layout${orderVehicles.length ? '' : ' no-vehicle'}"><aside class="panel order-approval-column">${orderTimeline(order)}</aside><div class="order-main-column"><section class="panel order-quote-card"><h2 class="section-title"><span><i class="fa-solid fa-file-lines"></i> ${expense ? 'مستندات المصروف / الخدمة' : 'عرض السعر'}</span>${detailActions}</h2>${expense ? (expenseDocuments.length ? expenseDocuments.map(media => `<a class="quote-file" href="${esc(media.url)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-lines"></i><span>${esc(media.name)}</span></a>`).join('') : '<div class="empty-inline">أرفق فاتورة الخدمة أو مستند المصروف قبل الإرسال.</div>') : (quote ? `<a class="quote-file" href="${esc(quote.url)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-pdf"></i><span><b>${bdi(quote.name)}</b><small>رقم العرض: ${bdi(order.quote_number)}</small></span><i class="fa-solid fa-arrow-up-right-from-square"></i></a>` : '<div class="empty-inline">لم يُرفع عرض سعر بعد.</div>')}${quoteNumberEditor}</section><section class="panel order-lines-card">
             <h2 class="section-title">بنود الطلب والمطابقة</h2>
             <div class="table-responsive">
                 <table class="table">
-                    <thead><tr><th>الصنف</th><th>المطلوب</th>${order.requires_receipt ? '<th>المستلم</th>' : ''}<th>بالفاتورة</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead>
-                    <tbody>${order.lines.map(line => `<tr><td>${esc(line.description)}</td><td>${line.quantity_milli / 1000}</td>${order.requires_receipt ? `<td>${(order.receipt?.lines.find(item => item.order_line_id === line.id)?.quantity_milli || 0) / 1000}</td>` : ''}<td>${(order.invoice?.lines.find(item => item.order_line_id === line.id)?.quantity_milli || 0) / 1000}</td><td>${money(line.unit_price_minor)}</td><td>${money(line.total_minor)}</td></tr>`).join('')}</tbody>
+                    <thead><tr><th>الصنف</th>${orderVehicles.length ? '<th>السيارة المستفيدة</th>' : ''}<th>المطلوب</th>${order.requires_receipt ? '<th>المستلم</th>' : ''}<th>بالفاتورة</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead>
+                    <tbody>${order.lines.map(line => `<tr><td>${esc(line.description)}</td>${orderVehicles.length ? `<td>${bdi(line.vehicle?.plate || '—')}</td>` : ''}<td>${line.quantity_milli / 1000}</td>${order.requires_receipt ? `<td>${(order.receipt?.lines.find(item => item.order_line_id === line.id)?.quantity_milli || 0) / 1000}</td>` : ''}<td>${(order.invoice?.lines.find(item => item.order_line_id === line.id)?.quantity_milli || 0) / 1000}</td><td>${money(line.unit_price_minor)}</td><td>${money(line.total_minor)}</td></tr>`).join('')}</tbody>
                 </table>
             </div>
             <div class="d-flex gap-4 flex-wrap">
@@ -1218,7 +1289,7 @@ async function detail(id) {
             ${order.invoice ? `<p>الفاتورة: ${bdi(order.invoice.number)} بقيمة ${money(order.invoice.total_minor)}</p>` : ''}
             ${order.payment ? `<p class="text-success">الحوالة: ${bdi(order.payment.reference)} بقيمة ${money(order.payment.amount_minor)}</p>` : ''}
             ${order.notes ? `<p>${esc(order.notes)}</p>` : ''}
-        </section></div>${order.vehicle_id ? `<section class="panel order-photos-card"><h2 class="section-title"><span><i class="fa-solid fa-camera"></i> صور السيارة</span><b>${new Set(vehiclePhotos.map(m => m.label)).size}/9</b></h2>${can('media.upload') && can('orders.update') && (order.status === 'draft' || order.can_record_documents) ? button('إضافة الصور والفيديو', 'vehicle-upload', 'images') : ''}<div class="vehicle-photo-grid">${Object.entries(lookup.photo_labels).map(([label, name]) => { const media = vehiclePhotos.find(m => m.label === label); return media ? renderPhoto(media) : `<div class="vehicle-empty"><i class="fa-solid fa-${photoIcon(label)}"></i><b>${esc(name)}</b><small>لم تُضف صورة</small></div>`; }).join('')}</div>${order.media.filter(m => m.mime.startsWith('video/')).map(m => `<video class="vehicle-video" controls preload="metadata" src="${esc(m.url)}"></video>`).join('')}</section>` : ''}</section>`
+        </section></div>${orderVehicles.length ? `<section class="panel order-photos-card"><h2 class="section-title"><span><i class="fa-solid fa-camera"></i> صور السيارات</span></h2><div class="order-vehicle-photo-groups">${vehiclePhotoGroups}</div>${order.media.filter(m => m.mime.startsWith('video/')).map(m => `<video class="vehicle-video" controls preload="metadata" src="${esc(m.url)}"></video>`).join('')}</section>` : ''}</section>`
     );
 
     $('#content').off('click.orderTimeline', '.order-timeline-toggle').on('click.orderTimeline', '.order-timeline-toggle', function () {
@@ -1258,7 +1329,7 @@ function masterFields(kind, record = {}) {
     if (kind === 'branches') html += select('region_id', 'المنطقة', lookup.regions, record.region_id);
     if (kind === 'warehouses') html += select('branch_id', 'الفرع', lookup.branches, record.branch_id);
     if (kind === 'suppliers') html += field('phone', 'رقم الهاتف', record.phone, 'text', false) + field('email', 'البريد الإلكتروني', record.email, 'email', false) + field('tax_number', 'الرقم الضريبي', record.tax_number, 'text', false) + field('iban', 'آيبان المورد / المستفيد (مطلوب لمستند التحويل)', record.iban, 'text', false, 'dir="ltr"') + textareaField('address', 'العنوان', record.address, false, 3);
-    if (kind === 'items') html += (record.id ? field('sku', 'كود الصنف', record.sku, 'text', false, 'readonly') : '') + field('unit', 'الوحدة', record.unit || 'قطعة') + field('unit_cost', 'تكلفة الوحدة', (record.unit_cost_minor || 0) / 100, 'number') + field('minimum', 'حد إعادة الطلب', (record.minimum_milli || 0) / 1000, 'number') + select('track_stock', 'تتبع المخزون', [{ id: 1, name: 'نعم' }, { id: 0, name: 'لا' }], record.track_stock === false ? 0 : 1);
+    if (kind === 'items') html += field('sku', 'كود الصنف', record.sku) + field('unit', 'الوحدة', record.unit || 'قطعة') + field('unit_cost', 'تكلفة الوحدة', (record.unit_cost_minor || 0) / 100, 'number') + field('minimum', 'حد إعادة الطلب', (record.minimum_milli || 0) / 1000, 'number') + select('track_stock', 'تتبع المخزون', [{ id: 1, name: 'نعم' }, { id: 0, name: 'لا' }], record.track_stock === false ? 0 : 1);
     html += select('active', 'الحالة', [{ id: 1, name: 'نشط' }, { id: 0, name: 'غير نشط' }], record.active === false ? 0 : 1);
 
     return `<div class="form-grid">${html}</div>`;
@@ -1357,6 +1428,7 @@ function inventoryTable(showMovements, lowStock = false, movementType = '') {
             { data: 'quantity_milli', title: 'الرصيد الحالي', className: 'inventory-number', render: value => bdi(quantityText(value)) },
             { data: 'minimum_milli', title: 'حد إعادة الطلب', className: 'inventory-number', render: value => bdi(quantityText(value)) },
             { data: null, title: 'حالة الرصيد', orderable: false, searchable: false, className: 'inventory-state-cell', render: row => stockStateBadge(row.quantity_milli, row.minimum_milli) },
+            { data: null, title: 'كارت الصنف', orderable: false, searchable: false, className: 'inventory-actions', render: () => '<button type="button" class="btn btn-light compact-action inventory-item-card" aria-label="فتح كارت الصنف"><i class="fa-solid fa-arrow-left"></i><span>فتح الكارت</span></button>' },
         ], { order: [[1, 'asc']] });
 
     $('#records')
@@ -1370,17 +1442,101 @@ function inventoryTable(showMovements, lowStock = false, movementType = '') {
         $('#records').off('click.movementDetails', '.movement-details').on('click.movementDetails', '.movement-details', function () {
             movementDetails(table.row($(this).closest('tr')).data());
         });
+    } else {
+        $('#records').off('click.inventoryItemCard', '.inventory-item-card').on('click.inventoryItemCard', '.inventory-item-card', function () {
+            const item = table.row($(this).closest('tr')).data();
+            const selectedWarehouse = panel.find('[name=warehouse_id]').val();
+            if (item?.id && selectedWarehouse) location.hash = `inventory-card?warehouse_id=${encodeURIComponent(selectedWarehouse)}&item_id=${encodeURIComponent(item.id)}`;
+        });
     }
 }
 
-function movementLine(index) {
+function movementLine(index, type) {
     const itemOptions = lookup.items.filter(item => item.track_stock);
-    const itemSelect = select(`movement_item_${index}`, 'الصنف', itemOptions).replace('<select ', '<select required ');
+    const itemSelect = select(`movement_item_${index}`, 'الصنف', itemOptions).replace('<select ', `<select required ${type === 'transfer' ? 'disabled ' : ''}`);
+    const balances = type === 'transfer' ? `<div class="movement-balance-summary" aria-live="polite">
+        <span class="movement-balance-card source"><i class="fa-solid fa-warehouse"></i><em>المصدر</em><strong class="movement-balance-value">—</strong><small class="movement-balance-unit">اختر المخزن والصنف</small></span>
+        <span class="movement-balance-card destination"><i class="fa-solid fa-warehouse"></i><em>المستلم</em><strong class="movement-balance-value">—</strong><small class="movement-balance-unit">اختر المخزن والصنف</small></span>
+    </div>` : '';
     return `<tr class="inventory-movement-line">
-        <td>${itemSelect}</td>
+        <td>${itemSelect}${balances}</td>
         <td>${field(`movement_quantity_${index}`, 'الكمية', 1, 'text', true, 'inputmode="decimal" pattern="[0-9]+([.][0-9]{1,3})?"')}</td>
         <td><button type="button" class="btn btn-light text-danger movement-line-remove" aria-label="حذف البند"><i class="fa-solid fa-trash"></i></button></td>
     </tr>`;
+}
+
+async function loadTransferItems() {
+    const sourceId = $('#editor [name=warehouse_id]').val();
+    const selects = $('#movement-lines select[name^="movement_item_"]');
+    const requestId = String(Date.now());
+    $('#movement-lines').data('itemsRequestId', requestId);
+    if (!sourceId) {
+        selects.empty().append(new Option('اختر المخزن المصدر أولاً', '')).prop('disabled', true).trigger('change.select2');
+        return;
+    }
+
+    selects.prop('disabled', true).trigger('change.select2');
+    const items = await api('inventory/items', 'GET', { warehouse_id: sourceId, available: 1 });
+    if ($('#movement-lines').data('itemsRequestId') !== requestId) return;
+    const selectedIds = selects.map(function () { return $(this).val(); }).get();
+    selects.each(function (index) {
+        const selectedId = selectedIds[index];
+        const picker = $(this).empty().append(new Option('اختر من القائمة', ''));
+        items.forEach(item => picker.append(new Option(`${item.sku} — ${item.name}`, item.id, false, String(item.id) === String(selectedId))));
+        picker.prop('disabled', false);
+    });
+    refreshTransferItemAvailability();
+    $('#movement-lines .inventory-movement-line').each(function () {
+        refreshTransferBalances($(this));
+    });
+}
+
+function refreshTransferItemAvailability() {
+    const selects = $('#movement-lines select[name^="movement_item_"]');
+    const selectedIds = selects.map(function () { return $(this).val(); }).get().filter(Boolean).map(String);
+    selects.each(function () {
+        const currentId = String($(this).val() || '');
+        $(this).find('option').each(function () {
+            this.disabled = Boolean(this.value) && this.value !== currentId && selectedIds.includes(this.value);
+        });
+        $(this).trigger('change.select2');
+    });
+}
+
+async function refreshTransferBalances(row) {
+    const sourceId = $('#editor [name=warehouse_id]').val();
+    const destinationId = $('#editor [name=destination_warehouse_id]').val();
+    const itemId = row.find('select[name^="movement_item_"]').val();
+    const cards = row.find('.movement-balance-card');
+    if (!sourceId || !destinationId || !itemId) {
+        cards.find('.movement-balance-value').text('—');
+        cards.find('.movement-balance-unit').text('اختر المخازن والصنف');
+        return;
+    }
+
+    const requestId = `${Date.now()}-${Math.random()}`;
+    row.data('balanceRequestId', requestId);
+    cards.addClass('is-loading');
+    cards.find('.movement-balance-value').text('…');
+    cards.find('.movement-balance-unit').text('جارٍ تحميل الرصيد');
+    try {
+        const [source, destination] = await Promise.all([
+            api('inventory/item-card', 'GET', { warehouse_id: sourceId, item_id: itemId }),
+            api('inventory/item-card', 'GET', { warehouse_id: destinationId, item_id: itemId }),
+        ]);
+        if (row.data('balanceRequestId') !== requestId) return;
+        const balances = [source, destination];
+        cards.each(function (index) {
+            $(this).removeClass('is-loading')
+                .find('.movement-balance-value').text(quantityText(balances[index].quantity_milli));
+            $(this).find('.movement-balance-unit').text(balances[index].item.unit);
+        });
+    } catch (error) {
+        if (row.data('balanceRequestId') !== requestId) return;
+        cards.removeClass('is-loading');
+        cards.find('.movement-balance-value').text('—');
+        cards.find('.movement-balance-unit').text('تعذر تحميل الرصيد');
+    }
 }
 
 function movementDetails(row) {
@@ -1399,9 +1555,10 @@ function movementDetails(row) {
 
 function movement(type) {
     const lineLabel = type === 'adjust' ? 'العدد الفعلي بالجرد' : 'الكمية';
-    openModal('حركة مخزنية', `<div class="form-grid">${select('warehouse_id', 'المخزن', lookup.warehouses)}${type === 'transfer' ? select('destination_warehouse_id', 'المخزن المستلم', lookup.warehouses) : ''}${type === 'issue' ? select('vehicle_id', 'السيارة', lookup.vehicles) + field('odometer', 'قراءة العداد', 0, 'number') : ''}${type === 'return' ? field('source_movement_id', 'رقم إذن الصرف الأصلي', '', 'number') : ''}${field('date', 'التاريخ', today(), 'date')}</div><section class="movement-lines-section"><div class="movement-lines-head"><h3>بنود الحركة</h3><button type="button" class="btn btn-light" id="movement-line-add"><i class="fa-solid fa-plus"></i>إضافة بند</button></div><div class="table-responsive"><table class="table movement-lines-table"><thead><tr><th>الصنف</th><th>${lineLabel}</th><th>إجراء</th></tr></thead><tbody id="movement-lines">${movementLine(0)}</tbody></table></div></section><div class="mt-3">${textareaField('notes', 'سبب الحركة', '', type === 'adjust')}</div>`, data => {
+    $('#editor').off('change.movementBalances');
+    openModal('حركة مخزنية', `<div class="form-grid">${select('warehouse_id', 'المخزن', lookup.warehouses)}${type === 'transfer' ? select('destination_warehouse_id', 'المخزن المستلم', lookup.warehouses) : ''}${type === 'issue' ? select('vehicle_id', 'السيارة', lookup.vehicles) + field('odometer', 'قراءة العداد', 0, 'number') : ''}${type === 'return' ? field('source_movement_id', 'رقم إذن الصرف الأصلي', '', 'number') : ''}${field('date', 'التاريخ', today(), 'date')}</div><section class="movement-lines-section"><div class="movement-lines-head"><h3>بنود الحركة</h3><button type="button" class="btn btn-light" id="movement-line-add"><i class="fa-solid fa-plus"></i>إضافة بند</button></div><div class="table-responsive"><table class="table movement-lines-table"><thead><tr><th>الصنف</th><th>${lineLabel}</th><th>إجراء</th></tr></thead><tbody id="movement-lines">${movementLine(0, type)}</tbody></table></div></section><div class="mt-3">${textareaField('notes', 'سبب الحركة', '', type === 'adjust')}</div>`, data => {
         data.lines = $('#movement-lines .inventory-movement-line').map(function () {
-            return { item_id: $(this).find('select').val(), quantity: $(this).find('input[type=number]').val() };
+            return { item_id: $(this).find('select').val(), quantity: $(this).find('input[name^="movement_quantity_"]').val() };
         }).get();
         if (!data.lines.length || data.lines.some(line => !line.item_id || !line.quantity)) {
             return Promise.reject({ status: 422, responseJSON: { errors: { lines: ['أكمل الصنف والكمية لكل بند.'] } } });
@@ -1412,13 +1569,24 @@ function movement(type) {
     });
     $('#movement-line-add').on('click', function () {
         const index = $('#movement-lines tr').length;
-        $('#movement-lines').append(movementLine(index));
+        $('#movement-lines').append(movementLine(index, type));
         enhance($('#movement-lines tr').last());
+        if (type === 'transfer') loadTransferItems();
     });
     $('#movement-lines').on('click', '.movement-line-remove', function () {
         if ($('#movement-lines tr').length === 1) return toastr.info('يجب الإبقاء على بند واحد على الأقل.');
         $(this).closest('tr').remove();
     });
+    if (type === 'transfer') {
+        $('#editor').off('change.movementBalances').on('change.movementBalances', '[name=warehouse_id], [name=destination_warehouse_id], select[name^="movement_item_"]', function () {
+            const rows = $(this).closest('.inventory-movement-line');
+            if ($(this).is('[name=warehouse_id]')) loadTransferItems();
+            if ($(this).is('select[name^="movement_item_"]')) refreshTransferItemAvailability();
+            (rows.length ? rows : $('#movement-lines .inventory-movement-line')).each(function () {
+                refreshTransferBalances($(this));
+            });
+        });
+    }
 }
 
 function inventory(routeParams = new URLSearchParams()) {
@@ -1447,6 +1615,53 @@ function inventory(routeParams = new URLSearchParams()) {
     panel.find('[name=warehouse_id]').on('change', loadItems);
     panel.find('[name=item_id]').on('change', refresh);
     loadItems(false);
+}
+
+async function inventoryCard(routeParams = new URLSearchParams()) {
+    const warehouseId = routeParams.get('warehouse_id');
+    const itemId = routeParams.get('item_id');
+    if (!warehouseId || !itemId) {
+        location.hash = 'inventory';
+        return;
+    }
+    const params = { warehouse_id: warehouseId, item_id: itemId };
+    const card = await api('inventory/item-card', 'GET', params);
+    const item = card.item;
+    const warehouse = card.warehouse;
+    const summary = () => `<div class="inventory-item-summary stats">
+        <div class="stat inventory-balance-summary"><i class="fa-solid fa-cubes"></i><div><span>الرصيد الحالي</span><strong><bdi>${quantityText(card.quantity_milli)}</bdi></strong><small>${esc(item.unit)}</small></div></div>
+        <div class="stat inventory-incoming-summary"><i class="fa-solid fa-arrow-down"></i><div><span>إجمالي الوارد</span><strong><bdi>${quantityText(card.incoming_milli)}</bdi></strong><small>${esc(item.unit)}</small></div></div>
+        <div class="stat inventory-outgoing-summary"><i class="fa-solid fa-arrow-up"></i><div><span>إجمالي المنصرف</span><strong><bdi>${quantityText(card.outgoing_milli)}</bdi></strong><small>${esc(item.unit)}</small></div></div>
+    </div>`;
+    $('#content').html(head(`كارت الصنف: ${esc(item.name)}`, `كود الصنف: ${esc(item.sku)} · مخزن ${esc(warehouse.name)}`, `<a href="#inventory" class="btn btn-light"><i class="fa-solid fa-arrow-right"></i>العودة إلى أرصدة الفروع</a>${can('excel.export') ? button('تصدير Excel', 'inventory-export', 'file-excel') : ''}`) + `<div class="panel inventory-item-card-panel" id="inventory-card-panel" data-warehouse-id="${Number(warehouseId)}" data-item-id="${Number(itemId)}"><div class="inventory-item-heading"><div class="service-icon"><i class="fa-solid fa-box-open"></i></div><div><h2>${esc(item.name)}</h2><p class="subtext">${esc(item.sku)} · حد إعادة الطلب: <bdi>${quantityText(item.minimum_milli)}</bdi> ${esc(item.unit)}</p></div></div>${summary()}<h3 class="section-title mt-4">حركة الصنف داخل ${esc(warehouse.name)}</h3><div class="inventory-card-filters form-grid"><div class="field"><label for="inventory-card-date-from">من تاريخ</label><input id="inventory-card-date-from" class="form-control" type="date"></div><div class="field"><label for="inventory-card-date-to">إلى تاريخ</label><input id="inventory-card-date-to" class="form-control" type="date"></div><div class="field d-flex align-items-end"><button type="button" class="btn btn-light w-100" id="inventory-card-reset"><i class="fa-solid fa-filter-circle-xmark"></i>مسح الفلاتر</button></div></div><div id="grid-area"></div></div>`);
+    const panel = $('#inventory-card-panel');
+    const renderMovements = async () => {
+        const dateFrom = $('#inventory-card-date-from').val();
+        const dateTo = $('#inventory-card-date-to').val();
+        const query = new URLSearchParams({ warehouse_id: warehouseId, item_id: itemId });
+        if (dateFrom) query.set('date_from', dateFrom);
+        if (dateTo) query.set('date_to', dateTo);
+        const updated = await api('inventory/item-card', 'GET', Object.fromEntries(query));
+        card.quantity_milli = updated.quantity_milli;
+        card.incoming_milli = updated.incoming_milli;
+        card.outgoing_milli = updated.outgoing_milli;
+        panel.find('.inventory-item-summary').replaceWith(summary());
+        grid('inventory/movements?' + query.toString(), [
+            col('date', 'التاريخ', { className: 'inventory-date', render: value => bdi(value) }),
+            col('number', 'رقم الحركة', { className: 'inventory-code', render: value => bdi(value) }),
+            col('type', 'نوع الحركة', { className: 'inventory-state-cell', render: value => movementBadge(value) }),
+            col('warehouse.name', 'المصدر / السيارة', { orderable: false, render: (value, type, row) => esc(row.vehicle?.plate || value || '—') }),
+            { data: 'lines', title: 'وارد', orderable: false, searchable: false, className: 'inventory-number', render: (lines, type, row) => { const line = lines?.[0]; const incoming = Number(row.destination_warehouse_id) === Number(warehouseId) ? Math.abs(Number(line?.quantity_milli || 0)) : Math.max(Number(line?.quantity_milli || 0), 0); return incoming ? bdi(quantityText(incoming)) : '—'; } },
+            { data: 'lines', title: 'منصرف', orderable: false, searchable: false, className: 'inventory-number', render: (lines, type, row) => { const line = lines?.[0]; const outgoing = Number(row.warehouse_id) === Number(warehouseId) ? Math.abs(Math.min(Number(line?.quantity_milli || 0), 0)) : 0; return outgoing ? bdi(quantityText(outgoing)) : '—'; } },
+            col('notes', 'الملاحظات'),
+            { data: null, title: 'التفاصيل', orderable: false, searchable: false, className: 'inventory-actions', render: () => '<button type="button" class="btn btn-light compact-action movement-details" aria-label="عرض تفاصيل الحركة"><i class="fa-solid fa-eye"></i><span>تفاصيل</span></button>' },
+        ], { order: [[0, 'desc']] });
+        $('#records').addClass('inventory-table inventory-item-movements-table').closest('.table-responsive').addClass('inventory-table-wrap');
+        $('#records').off('click.movementDetails', '.movement-details').on('click.movementDetails', '.movement-details', function () { movementDetails(table.row($(this).closest('tr')).data()); });
+    };
+    $('#inventory-card-date-from, #inventory-card-date-to').on('change', renderMovements);
+    $('#inventory-card-reset').on('click', () => { $('#inventory-card-date-from, #inventory-card-date-to').val(''); renderMovements(); });
+    await renderMovements();
 }
 
 function cardFilterQuery(includeStatus = true) {
@@ -1694,11 +1909,12 @@ function activity() {
     $('#records').addClass('admin-table activity-table').closest('.table-responsive').addClass('admin-table-wrap');
 }
 
-function uploadFile(orderId, collection, file, label = '') {
+function uploadFile(orderId, collection, file, label = '', vehicleId = null) {
     const data = new FormData();
     data.append('collection', collection);
     data.append('file', file);
     if (label) data.append('label', label);
+    if (vehicleId) data.append('vehicle_id', vehicleId);
     return $.ajax({ url: `/api/orders/${orderId}/media`, method: 'POST', data, processData: false, contentType: false });
 }
 
@@ -1757,14 +1973,18 @@ function vehicleGallery(photos, selectedId) {
     dialog.querySelector('[data-gallery="close"]').focus();
 }
 
-function vehicleUpload() {
+function vehicleUpload(vehicleId = null) {
     ensureOrderDetailStyle();
     const order = currentOrder;
     const collection = order.status === 'draft' ? 'photos_before' : 'photos_after';
+    const orderVehicles = order.order_vehicles?.length ? order.order_vehicles : (order.vehicle_id ? [{ vehicle_id: order.vehicle_id, vehicle: order.vehicle }] : []);
+    const selectedVehicleId = vehicleId || orderVehicles[0]?.vehicle_id;
+    const selectedVehicle = orderVehicles.find(row => String(row.vehicle_id) === String(selectedVehicleId));
+    if (!selectedVehicleId) return toastr.error('لا توجد سيارة مرتبطة بهذا الطلب.');
     const labels = { ...lookup.photo_labels, video: 'فيديو السيارة (اختياري)' };
     const pending = new Map();
     const urls = new Map();
-    const existing = new Set(order.media.filter(m => m.collection === collection).map(m => m.label));
+    const existing = new Set(order.media.filter(m => m.collection === collection && String(m.vehicle_id || (orderVehicles.length === 1 ? selectedVehicleId : '')) === String(selectedVehicleId)).map(m => m.label));
     let stream = null;
     let cameraLabel = null;
     let uploading = false;
@@ -1787,7 +2007,7 @@ function vehicleUpload() {
         slot(label).find('.vehicle-remove').prop('hidden', false);
     };
     const fileControl = (label, camera = false) => `<label class="btn btn-${camera ? 'primary' : 'light'}"><i class="fa-solid fa-${camera ? 'camera' : 'folder-open'}"></i>${camera ? 'كاميرا الهاتف' : 'اختيار ملف'}<input class="vehicle-file-input" data-slot="${label}" type="file" accept="${label === 'video' ? 'video/mp4' : 'image/jpeg,image/png,image/webp'}" ${camera ? 'capture="environment"' : ''} aria-label="${camera ? 'تصوير' : 'اختيار'} ${esc(labels[label])}"></label>`;
-    openModal(collection === 'photos_before' ? 'صور السيارة والفيديو — قبل الإصلاح' : 'صور السيارة والفيديو — بعد الإصلاح', `
+    openModal(`${collection === 'photos_before' ? 'صور السيارة والفيديو — قبل الإصلاح' : 'صور السيارة والفيديو — بعد الإصلاح'}: ${selectedVehicle?.vehicle?.plate || selectedVehicleId}`, `
         <div class="vehicle-upload-toolbar"><label class="btn btn-primary"><i class="fa-solid fa-images"></i>اختيار عدة صور<input id="vehicle-bulk" class="vehicle-file-input" type="file" multiple accept="image/jpeg,image/png,image/webp" aria-label="اختيار عدة صور"></label><p>اختر الصور معًا ثم راجع توزيعها على الزوايا. يمكنك تغيير زاوية كل صورة قبل الرفع. الحد الأقصى لكل صورة أو فيديو: 10 ميجابايت.</p></div>
         <div id="vehicle-camera" class="vehicle-camera" hidden><video id="vehicle-live" autoplay muted playsinline></video><div class="action-bar"><button type="button" id="vehicle-snap" class="btn btn-primary">التقاط الصورة</button><button type="button" id="vehicle-camera-close" class="btn btn-light">إغلاق الكاميرا</button></div></div>
         <div class="vehicle-upload-grid">${Object.entries(labels).map(([label, name], index) => `<section class="vehicle-slot" id="vehicle-slot-${label}"><h3>${index + 1}. ${esc(name)}</h3><div class="vehicle-slot-preview"><i class="fa-solid fa-${photoIcon(label)}"></i></div>${label !== 'video' ? `<select class="form-select vehicle-angle" data-slot="${label}" aria-label="تغيير زاوية ${esc(name)}">${Object.entries(lookup.photo_labels).map(([key, value]) => `<option value="${key}" ${key === label ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select>` : ''}<div class="vehicle-slot-actions">${fileControl(label)}${label !== 'video' ? `${fileControl(label, true)}<button class="btn btn-light vehicle-camera-open" data-slot="${label}" type="button">فتح الكاميرا</button>` : ''}<button type="button" class="btn btn-light vehicle-remove" data-slot="${label}" hidden>إلغاء الاختيار</button></div><span class="vehicle-slot-status">${existing.has(label) ? 'توجد صورة محفوظة لهذه الزاوية' : 'لم يتم اختيار ملف'}</span></section>`).join('')}</div>
@@ -1802,7 +2022,7 @@ function vehicleUpload() {
             for (const [label, file] of entries) {
                 $('#vehicle-upload-progress').text(`جارٍ رفع ${completed + 1} من ${entries.length}…`);
                 try {
-                    await uploadFile(order.id, label === 'video' ? 'vehicle_video' : collection, file, label === 'video' ? '' : label);
+                    await uploadFile(order.id, label === 'video' ? 'vehicle_video' : collection, file, label === 'video' ? '' : label, selectedVehicleId);
                     pending.delete(label); existing.add(label); completed++;
                     slot(label).find('.vehicle-remove').prop('hidden', true);
                     status(label, 'تم الرفع بنجاح');
@@ -1819,7 +2039,7 @@ function vehicleUpload() {
     });
     $('#editor-form button[type=submit]').text('رفع الملفات المختارة');
     Object.keys(labels).forEach(label => {
-        const saved = [...order.media].reverse().find(m => label === 'video' ? m.collection === 'vehicle_video' : m.collection === collection && m.label === label);
+        const saved = [...order.media].reverse().find(m => (label === 'video' ? m.collection === 'vehicle_video' : m.collection === collection && m.label === label) && String(m.vehicle_id || (orderVehicles.length === 1 ? selectedVehicleId : '')) === String(selectedVehicleId));
         if (saved) slot(label).find('.vehicle-slot-preview').html(label === 'video' ? `<video controls preload="metadata" src="${esc(saved.url)}"></video>` : `<img src="${esc(saved.url)}" alt="${esc(labels[label])}">`);
     });
     $('#editor .vehicle-slot-preview img').on('error', function () { $(this).replaceWith('<i class="fa-solid fa-image" title="تعذر تحميل الصورة المحفوظة"></i>'); });
@@ -2072,14 +2292,69 @@ $(document).on('click', '.remove-line', async function () {
             addLine();
             clearOrderFieldError('lines');
             break;
+        case 'order-vehicle-add':
+            addOrderVehicle();
+            break;
+        case 'order-vehicle-remove': {
+            const rows = $('#order-vehicles .po-vehicle-row');
+            if (rows.length <= 1) {
+                toastr.warning('يجب أن يبقى صف سيارة واحد على الأقل في الطلبات المرتبطة بالسيارات.');
+                break;
+            }
+            $(this).closest('.po-vehicle-row').remove();
+            $('#order-vehicles .po-vehicle-row').each(function (index) {
+                $(this).attr('data-vehicle-index', index).find('.po-vehicle-row-title b').text(index + 1);
+            });
+            refreshLineVehicleOptions();
+            break;
+        }
         case 'edit-order':
             orderForm(currentOrder);
             break;
+        case 'save-quote-number': {
+            const quoteNumber = $('#order-quote-number').val().trim();
+            if (!quoteNumber) {
+                toastr.error('أدخل رقم عرض السعر أولًا.');
+                break;
+            }
+            const order = currentOrder;
+            const data = {
+                category: order.category,
+                branch_id: order.branch_id,
+                cost_center_id: order.cost_center_id,
+                supplier_id: order.supplier_id,
+                vehicle_id: order.vehicle_id || null,
+                warehouse_id: order.warehouse_id || null,
+                maintenance_card_id: order.maintenance_card_id || null,
+                odometer: order.odometer ?? null,
+                payment_timing: order.payment_timing,
+                date: order.date,
+                priority: order.priority,
+                quote_number: quoteNumber,
+                notes: order.notes || null,
+                tax_percent: order.tax_basis_points === 1500 ? '15' : '0',
+                lines: order.lines.map(line => ({ item_id: line.item_id, vehicle_id: line.vehicle_id || null, quantity: String(line.quantity_milli / 1000), unit_price: String(line.unit_price_minor / 100) })),
+            };
+            if (order.order_vehicles?.length) {
+                data.vehicles = order.order_vehicles.map(vehicle => ({ vehicle_id: vehicle.vehicle_id, maintenance_card_id: vehicle.maintenance_card_id || null, odometer: vehicle.odometer ?? null }));
+            }
+            const trigger = $(this).prop('disabled', true);
+            try {
+                await api('orders/' + order.id, 'PUT', data);
+                await detail(order.id);
+                toastr.success('تم حفظ رقم عرض السعر.');
+            } catch (error) {
+                toastr.error(Object.values(error.responseJSON?.errors || {}).flat().join(' ') || 'تعذر حفظ رقم عرض السعر.');
+            } finally {
+                trigger.prop('disabled', false);
+            }
+            break;
+        }
         case 'upload':
             upload();
             break;
         case 'vehicle-upload':
-            vehicleUpload();
+            vehicleUpload(Number(this.dataset.vehicleId) || null);
             break;
         case 'relabel-photo': {
             const media = currentOrder.media.find(m => m.id === Number(this.dataset.id));
@@ -2095,14 +2370,11 @@ $(document).on('click', '.remove-line', async function () {
             const next = this.dataset.next;
             if (next === 'submit') {
                 const missing = [];
-                if (!currentOrder.quote_number?.trim()) missing.push('رقم عرض السعر');
-                if (!currentOrder.media.some(media => media.collection === 'quote')) missing.push('ملف عرض السعر بصيغة PDF');
-                if (currentOrder.vehicle_id) {
-                    const requiredPhotos = Object.keys(lookup.photo_labels || {});
-                    const uploadedPhotos = currentOrder.media
-                        .filter(media => media.collection === 'photos_before')
-                        .map(media => media.label);
-                    if (requiredPhotos.some(label => !uploadedPhotos.includes(label))) missing.push('صور السيارة التسع قبل الإصلاح');
+                if (currentOrder.requires_receipt) {
+                    if (!currentOrder.quote_number?.trim()) missing.push('رقم عرض السعر');
+                    if (!currentOrder.media.some(media => media.collection === 'quote')) missing.push('ملف عرض السعر بصيغة PDF');
+                } else if (!currentOrder.media.some(media => ['attachments', 'quote'].includes(media.collection))) {
+                    missing.push('مستند المصروف أو فاتورة الخدمة');
                 }
                 if (missing.length) {
                     toastr.error(`أكمل البيانات التالية قبل الإرسال للمراجعة: ${missing.join('، ')}.`);
@@ -2112,7 +2384,7 @@ $(document).on('click', '.remove-line', async function () {
             const needsReason = ['return', 'reject'].includes(next);
             const result = await Swal.fire({
                 title: 'تأكيد الإجراء',
-                text: next === 'submit' ? 'تم استيفاء رقم عرض السعر ومستند العرض. هل تريد إرسال الطلب للمراجعة؟' : next === 'match' ? 'سيجري النظام مطابقة المستندات والكميات والقيمة على الخادم.' : 'هل تريد تنفيذ هذا الإجراء الآن؟',
+                text: next === 'submit' ? (currentOrder.requires_receipt ? 'تم استيفاء رقم عرض السعر ومستند العرض. هل تريد إرسال الطلب للمراجعة؟' : 'تم استيفاء مستند المصروف أو فاتورة الخدمة. هل تريد إرسال الطلب للمراجعة؟') : next === 'match' ? 'سيجري النظام مطابقة المستندات والكميات والقيمة على الخادم.' : 'هل تريد تنفيذ هذا الإجراء الآن؟',
                 input: needsReason ? 'textarea' : undefined,
                 inputLabel: needsReason ? 'سبب الإجراء' : undefined,
                 showCancelButton: true,
@@ -2175,8 +2447,8 @@ $(document).on('click', '.remove-line', async function () {
             break;
         }
         case 'inventory-export': {
-            const panel = $('#inventory-panel');
-            if (!panel.data('showMovements')) {
+            const panel = $('#inventory-card-panel, #inventory-panel').first();
+            if (!panel.is('#inventory-card-panel') && !panel.data('showMovements')) {
                 location.href = '/api/inventory/movements?' + $.param({
                     warehouse_id: panel.find('[name=warehouse_id]').val() || '',
                     item_id: panel.find('[name=item_id]').val() || '',

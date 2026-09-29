@@ -22,4 +22,9 @@ class OrderLine extends Model
     {
         return $this->belongsTo(Item::class);
     }
+
+    public function vehicle()
+    {
+        return $this->belongsTo(Vehicle::class);
+    }
 }

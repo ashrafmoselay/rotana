@@ -18,7 +18,7 @@ class MediaController extends Controller
     {
         Access::allow('media.upload');
         Access::branch($order->branch_id);
-        $data = $r->validate(['collection' => ['required', Rule::in(['quote', 'photos_before', 'photos_after', 'attachments', 'invoice', 'proof', 'vehicle_video'])], 'label' => ['nullable', Rule::in(array_keys(config('rotana.photo_labels')))], 'file' => 'required|file|max:10240|mimes:pdf,jpg,jpeg,png,webp,mp4']);
+        $data = $r->validate(['collection' => ['required', Rule::in(['quote', 'photos_before', 'photos_after', 'attachments', 'invoice', 'proof', 'vehicle_video'])], 'label' => ['nullable', Rule::in(array_keys(config('rotana.photo_labels')))], 'vehicle_id' => 'nullable|integer|exists:vehicles,id', 'file' => 'required|file|max:10240|mimes:pdf,jpg,jpeg,png,webp,mp4']);
         $collection = $data['collection'];
 
         return DB::transaction(function () use ($r, $order, $data, $collection) {
@@ -46,6 +46,12 @@ class MediaController extends Controller
             }
             if (str_starts_with($collection, 'photos_')) {
                 abort_unless(in_array($r->file('file')->getMimeType(), ['image/jpeg', 'image/png', 'image/webp']) && isset($data['label']), 422, 'الصورة والجهة مطلوبة.');
+                $vehicleIds = $order->orderVehicles()->pluck('vehicle_id');
+                if ($vehicleIds->isEmpty() && $order->vehicle_id) {
+                    $vehicleIds->push($order->vehicle_id);
+                }
+                $data['vehicle_id'] ??= $vehicleIds->count() === 1 ? $vehicleIds->first() : null;
+                abort_unless($vehicleIds->contains((int) $data['vehicle_id']), 422, 'اختر سيارة مرتبطة بالطلب قبل رفع الصورة.');
             }
             if ($collection === 'quote') {
                 abort_unless($r->file('file')->getMimeType() === 'application/pdf', 422, 'عرض السعر يجب أن يكون PDF.');
@@ -54,7 +60,7 @@ class MediaController extends Controller
                 abort_unless(in_array($r->file('file')->getMimeType(), ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']), 422, 'ارفع مستند PDF أو صورة.');
             }
             abort_if($order->media()->count() >= 60, 422, 'تم الوصول للحد الأقصى للمرفقات.');
-            $m = $order->addMediaFromRequest('file')->withCustomProperties(['label' => $data['label'] ?? null, 'uploaded_by' => auth()->id()])->toMediaCollection($collection, 'private_media');
+            $m = $order->addMediaFromRequest('file')->withCustomProperties(['label' => $data['label'] ?? null, 'vehicle_id' => $data['vehicle_id'] ?? null, 'uploaded_by' => auth()->id()])->toMediaCollection($collection, 'private_media');
             Audit::record('media.uploaded', $order, ['branch_id' => $order->branch_id, 'media_id' => $m->id, 'collection' => $collection]);
 
             return response()->json(['id' => $m->id, 'url' => route('media.show', $m->id)], 201);
@@ -83,7 +89,8 @@ class MediaController extends Controller
             $this->allowPhotoChange($order, $media);
             $media->refresh();
             $before = $media->getCustomProperty('label');
-            $occupied = $order->getMedia($media->collection_name)->contains(fn ($item) => $item->id !== $media->id && $item->getCustomProperty('label') === $data['label']);
+            $vehicleId = $media->getCustomProperty('vehicle_id');
+            $occupied = $order->getMedia($media->collection_name)->contains(fn ($item) => $item->id !== $media->id && $item->getCustomProperty('vehicle_id') == $vehicleId && $item->getCustomProperty('label') === $data['label']);
             abort_if($occupied && $before !== $data['label'], 422, 'الزاوية المختارة تحتوي على صورة. اختر زاوية فارغة أو أعد تعيين الصورة الموجودة أولًا.');
             $media->setCustomProperty('label', $data['label'])->save();
             Audit::record('media.relabeled', $order, ['branch_id' => $order->branch_id, 'media_id' => $media->id, 'from' => $before, 'to' => $data['label']]);

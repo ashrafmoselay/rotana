@@ -46,6 +46,7 @@ Route::middleware(['auth', 'active'])->group(function () {
         Route::post('orders/{order}/media', [MediaController::class, 'store']);
         Route::get('inventory/balances', [InventoryController::class, 'balances']);
         Route::get('inventory/items', [InventoryController::class, 'items']);
+        Route::get('inventory/item-card', [InventoryController::class, 'itemCard']);
         Route::get('inventory/movements', [InventoryController::class, 'movements']);
         Route::post('inventory/movements', [InventoryController::class, 'store']);
         Route::delete('records/{kind}', function (\Illuminate\Http\Request $request, string $kind, DeletionService $service) {

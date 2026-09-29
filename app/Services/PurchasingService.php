@@ -8,6 +8,7 @@ use App\Models\CostCenter;
 use App\Models\Item;
 use App\Models\MaintenanceCard;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderVehicle;
 use App\Models\Supplier;
 use App\Models\Vehicle;
 use App\Models\Warehouse;
@@ -43,38 +44,71 @@ class PurchasingService
             $supplier = Supplier::findOrFail($data['supplier_id']);
             $center = CostCenter::findOrFail($data['cost_center_id']);
             $this->require($branch->active && $supplier->active && $center->active, 'الفرع أو المورد أو مركز التكلفة غير نشط.');
-            $vehicle = null;
-            if (in_array($data['category'], ['maintenance', 'damage', 'parts', 'quotes'])) {
-                $vehicle = Vehicle::lockForUpdate()->findOrFail($data['vehicle_id'] ?? 0);
-                Access::branch($vehicle->branch_id);
-                $this->require($vehicle->active && $vehicle->branch_id === $branch->id, 'اختر سيارة نشطة من فرع الطلب.');
+            $vehicleOrder = in_array($data['category'], ['maintenance', 'damage', 'parts', 'quotes']);
+            $vehicleInputs = $vehicleOrder ? ($data['vehicles'] ?? []) : [];
+            $legacyVehiclePayload = $vehicleOrder && ! array_key_exists('vehicles', $data);
+            // Keep the original single-vehicle payload valid for integrations and old drafts.
+            if ($vehicleOrder && ! $vehicleInputs && ! empty($data['vehicle_id'])) {
+                $vehicleInputs = [[
+                    'vehicle_id' => $data['vehicle_id'],
+                    'maintenance_card_id' => $data['maintenance_card_id'] ?? null,
+                    'odometer' => $data['odometer'] ?? null,
+                ]];
             }
+            $this->require(! $vehicleOrder || count($vehicleInputs) > 0, 'أضف سيارة واحدة على الأقل إلى الطلب.');
+            $vehicleIds = array_map(fn ($input) => (int) $input['vehicle_id'], $vehicleInputs);
+            $this->require(count($vehicleIds) === count(array_unique($vehicleIds)), 'لا يمكن إضافة السيارة نفسها أكثر من مرة.');
+            $vehicles = Vehicle::lockForUpdate()->whereIn('id', $vehicleIds)->get()->keyBy('id');
+            $this->require($vehicles->count() === count($vehicleIds), 'اختر سيارات صحيحة للطلب.');
+            foreach ($vehicles as $vehicle) {
+                Access::branch($vehicle->branch_id);
+                $this->require($vehicle->active && $vehicle->branch_id === $branch->id, 'اختر سيارات نشطة من فرع الطلب.');
+            }
+            $existingVehicles = $order?->orderVehicles()->get()->keyBy('vehicle_id') ?? collect();
+            $orderVehicles = [];
+            foreach ($vehicleInputs as $input) {
+                $vehicle = $vehicles[(int) $input['vehicle_id']];
+                $card = null;
+                if (! empty($input['maintenance_card_id'])) {
+                    $card = MaintenanceCard::lockForUpdate()->findOrFail($input['maintenance_card_id']);
+                    Access::branch($card->branch_id);
+                    $this->require($card->vehicle_id === $vehicle->id && $card->branch_id === $branch->id, 'كارت الصيانة لا يخص السيارة أو الفرع المحدد.');
+                    $this->require(! PurchaseOrder::where('maintenance_card_id', $card->id)->when($order, fn ($q) => $q->whereKeyNot($order->id))->exists(), 'كارت الصيانة مرتبط بطلب آخر.');
+                    $this->require(! PurchaseOrderVehicle::where('maintenance_card_id', $card->id)->when($order, fn ($q) => $q->where('purchase_order_id', '!=', $order->id))->exists(), 'كارت الصيانة مرتبط بطلب آخر.');
+                }
+                $previous = $existingVehicles->get($vehicle->id);
+                $orderVehicles[] = [
+                    'vehicle_id' => $vehicle->id,
+                    'maintenance_card_id' => $card?->id,
+                    'odometer' => $input['odometer'] ?? $previous?->odometer ?? $card?->odometer ?? $vehicle->odometer,
+                ];
+            }
+            $vehicle = $vehicleOrder ? $vehicles->get($vehicleIds[0]) : null;
             $warehouse = null;
             if ($data['category'] === 'stock') {
                 $warehouse = Warehouse::findOrFail($data['warehouse_id'] ?? 0);
                 Access::branch($warehouse->branch_id);
                 $this->require($warehouse->active && $warehouse->branch_id === $branch->id, 'اختر مخزنًا نشطًا من فرع الطلب.');
             }
-            $card = null;
-            if ($vehicle && ! empty($data['maintenance_card_id'])) {
-                $card = MaintenanceCard::lockForUpdate()->findOrFail($data['maintenance_card_id']);
-                Access::branch($card->branch_id);
-                $this->require($card->vehicle_id === $vehicle?->id && $card->branch_id === $branch->id, 'كارت الصيانة لا يخص هذه السيارة أو الفرع.');
-                $this->require(! PurchaseOrder::where('maintenance_card_id', $card->id)->when($order, fn ($q) => $q->whereKeyNot($order->id))->exists(), 'الكارت مرتبط بطلب آخر.');
-            }
             $lines = [];
             $subtotal = 0;
+            $lineKeys = [];
             foreach ($data['lines'] as $line) {
                 $item = Item::findOrFail($line['item_id']);
                 $q = Amounts::scaled($line['quantity'], 3);
                 $p = Amounts::scaled($line['unit_price']);
+                $lineVehicleId = $vehicleOrder ? (int) ($line['vehicle_id'] ?? ($legacyVehiclePayload ? $vehicleIds[0] : 0)) : null;
+                $this->require(! $vehicleOrder || isset($vehicles[$lineVehicleId]), 'اربط كل بند بإحدى سيارات الطلب.');
+                $lineKey = $item->id.':'.($lineVehicleId ?? 'none');
+                $this->require(! isset($lineKeys[$lineKey]), 'لا تكرر الصنف للسيارة نفسها؛ عدّل الكمية بدلًا من ذلك.');
+                $lineKeys[$lineKey] = true;
                 $this->require($item->active && $q > 0, 'الصنف غير نشط أو الكمية غير صحيحة.');
                 if ($warehouse) {
                     $this->require($item->track_stock, 'طلبات التزويد تتطلب أصناف مخزون.');
                 }
                 $total = Amounts::line($q, $p);
                 $this->require($total <= 100000000000000, 'قيمة البند تتجاوز الحد المسموح.');
-                $lines[] = ['item_id' => $item->id, 'description' => $item->name, 'sku' => $item->sku, 'quantity_milli' => $q, 'unit_price_minor' => $p, 'total_minor' => $total];
+                $lines[] = ['item_id' => $item->id, 'vehicle_id' => $lineVehicleId, 'description' => $item->name, 'sku' => $item->sku, 'quantity_milli' => $q, 'unit_price_minor' => $p, 'total_minor' => $total];
                 $subtotal += $total;
             }
             $taxBasis = Amounts::scaled($data['tax_percent']);
@@ -82,17 +116,19 @@ class PurchasingService
             $tax = Amounts::tax($subtotal, $taxBasis);
             $this->require($subtotal + $tax <= 99999999900, 'إجمالي الطلب يتجاوز الحد المسموح.');
             $values = ['category' => $data['category'], 'branch_id' => $branch->id, 'cost_center_id' => $center->id, 'supplier_id' => $supplier->id, 'vehicle_id' => $vehicle?->id, 'warehouse_id' => $warehouse?->id, 'maintenance_card_id' => $data['maintenance_card_id'] ?? null, 'date' => $data['date'], 'priority' => $data['priority'], 'quote_number' => $data['quote_number'] ?? null, 'notes' => $data['notes'] ?? null, 'branch_name' => $branch->name, 'region_name' => $branch->region->name, 'supplier_name' => $supplier->name, 'vehicle_plate' => $vehicle?->plate, 'subtotal_minor' => $subtotal, 'tax_basis_points' => $taxBasis, 'tax_minor' => $tax, 'total_minor' => $subtotal + $tax];
-            $values['maintenance_card_id'] = $card?->id;
-            $values['odometer'] = $vehicle ? ($data['odometer'] ?? ($order?->vehicle_id === $vehicle->id ? $order?->odometer : null) ?? $card?->odometer ?? $vehicle->odometer) : null;
+            $values['maintenance_card_id'] = $orderVehicles[0]['maintenance_card_id'] ?? null;
+            $values['odometer'] = $orderVehicles[0]['odometer'] ?? null;
             $values['payment_timing'] = $data['payment_timing'] ?? $order?->payment_timing ?? 'after_receipt';
             $this->require(in_array($values['payment_timing'], ['after_receipt', 'before_receipt'], true), 'اختر توقيت دفع صحيحًا.');
             if ($order) {
                 $order->update($values);
                 $order->lines()->delete();
+                $order->orderVehicles()->delete();
             } else {
                 $order = PurchaseOrder::create($values + ['status' => S::Draft, 'created_by' => auth()->id()]);
                 $order->update(['number' => 'PR-'.now()->year.'-'.str_pad($order->id, 6, '0', STR_PAD_LEFT)]);
             }
+            $order->orderVehicles()->createMany($orderVehicles);
             $order->lines()->createMany($lines);
             Audit::record('orders.saved', $order, ['branch_id' => $order->branch_id, 'total_minor' => $order->total_minor]);
 
@@ -127,10 +163,6 @@ class PurchasingService
                     $this->require((bool) $order->quote_number && $order->getMedia('quote')->isNotEmpty(), 'أدخل رقم عرض السعر وأرفق مستنده.');
                 } else {
                     $this->require($order->getMedia('attachments')->isNotEmpty() || $order->getMedia('quote')->isNotEmpty(), 'أرفق مستند المصروف أو فاتورة الخدمة قبل الإرسال.');
-                }
-                if ($order->vehicle_id) {
-                    $labels = $order->getMedia('photos_before')->map(fn ($m) => $m->getCustomProperty('label'))->all();
-                    $this->require(! array_diff(array_keys(config('rotana.photo_labels')), $labels), 'أكمل الصور التسع المطلوبة.');
                 }
                 $this->change($order, S::Accountant, 'orders.submitted');
             } elseif ($action === 'approve') {

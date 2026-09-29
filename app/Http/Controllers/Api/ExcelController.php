@@ -20,7 +20,7 @@ use Maatwebsite\Excel\Facades\Excel;
 
 class ExcelController extends Controller
 {
-    private const IMPORT_HEADERS = ['items' => ['name', 'unit', 'track_stock', 'unit_cost', 'minimum'], 'suppliers' => ['name', 'phone', 'email', 'tax_number', 'iban', 'address'], 'vehicles' => ['plate', 'vin', 'model', 'year', 'color', 'odometer', 'branch_code', 'cost_center_code']];
+    private const IMPORT_HEADERS = ['items' => ['sku', 'name', 'unit', 'track_stock', 'unit_cost', 'minimum'], 'suppliers' => ['name', 'phone', 'email', 'tax_number', 'iban', 'address'], 'vehicles' => ['plate', 'vin', 'model', 'year', 'color', 'odometer', 'branch_code', 'cost_center_code']];
     private const EXPORT_HEADERS = ['items' => ['sku', 'name', 'unit', 'track_stock', 'unit_cost', 'minimum'], 'suppliers' => ['code', 'name', 'phone', 'email', 'tax_number', 'iban', 'address'], 'vehicles' => ['plate', 'vin', 'model', 'year', 'color', 'odometer', 'branch_code', 'cost_center_code']];
 
     public function template(string $kind)

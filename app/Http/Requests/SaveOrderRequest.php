@@ -4,6 +4,7 @@ namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 class SaveOrderRequest extends FormRequest
 {
@@ -14,11 +15,31 @@ class SaveOrderRequest extends FormRequest
 
     public function rules(): array
     {
-        return ['category' => ['required', Rule::in(array_keys(config('rotana.categories')))], 'branch_id' => 'required|integer|exists:branches,id', 'cost_center_id' => 'required|integer|exists:cost_centers,id', 'supplier_id' => 'required|integer|exists:suppliers,id', 'vehicle_id' => 'nullable|integer|exists:vehicles,id', 'warehouse_id' => 'nullable|integer|exists:warehouses,id', 'maintenance_card_id' => 'nullable|integer|exists:maintenance_cards,id', 'odometer' => 'nullable|integer|min:0|max:999999999', 'payment_timing' => ['sometimes', 'required', Rule::in(['after_receipt', 'before_receipt'])], 'date' => 'required|date_format:Y-m-d', 'priority' => ['required', Rule::in(['normal', 'urgent', 'critical'])], 'quote_number' => 'nullable|string|max:100', 'notes' => 'nullable|string|max:5000', 'tax_percent' => ['required', 'numeric', 'min:0', 'max:100', 'regex:/^\d{1,3}(\.\d{1,2})?$/', function ($attribute, $value, $fail) { if (! in_array((float) $value, [0.0, 15.0], true)) $fail('الضريبة المتاحة هي 15% أو بدون ضريبة.'); }], 'lines' => 'required|array|min:1|max:100', 'lines.*.item_id' => 'required|integer|distinct|exists:items,id', 'lines.*.quantity' => ['required', 'numeric', 'gt:0', 'max:1000000', 'regex:/^\d+(\.\d{1,3})?$/'], 'lines.*.unit_price' => ['required', 'numeric', 'min:0', 'max:10000000', 'regex:/^\d+(\.\d{1,2})?$/']];
+        return ['category' => ['required', Rule::in(array_keys(config('rotana.categories')))], 'branch_id' => 'required|integer|exists:branches,id', 'cost_center_id' => 'required|integer|exists:cost_centers,id', 'supplier_id' => 'required|integer|exists:suppliers,id', 'vehicle_id' => 'nullable|integer|exists:vehicles,id', 'warehouse_id' => 'nullable|integer|exists:warehouses,id', 'maintenance_card_id' => 'nullable|integer|exists:maintenance_cards,id', 'odometer' => 'nullable|integer|min:0|max:999999999', 'vehicles' => 'nullable|array|max:30', 'vehicles.*.vehicle_id' => 'required|integer|distinct|exists:vehicles,id', 'vehicles.*.maintenance_card_id' => 'nullable|integer|distinct|exists:maintenance_cards,id', 'vehicles.*.odometer' => 'nullable|integer|min:0|max:999999999', 'payment_timing' => ['sometimes', 'required', Rule::in(['after_receipt', 'before_receipt'])], 'date' => 'required|date_format:Y-m-d', 'priority' => ['required', Rule::in(['normal', 'urgent', 'critical'])], 'quote_number' => 'nullable|string|max:100', 'notes' => 'nullable|string|max:5000', 'tax_percent' => ['required', 'numeric', 'min:0', 'max:100', 'regex:/^\d{1,3}(\.\d{1,2})?$/', function ($attribute, $value, $fail) { if (! in_array((float) $value, [0.0, 15.0], true)) $fail('الضريبة المتاحة هي 15% أو بدون ضريبة.'); }], 'lines' => 'required|array|min:1|max:100', 'lines.*.item_id' => 'required|integer|exists:items,id', 'lines.*.vehicle_id' => 'nullable|integer|exists:vehicles,id', 'lines.*.quantity' => ['required', 'numeric', 'gt:0', 'max:1000000', 'regex:/^\d+(\.\d{1,3})?$/'], 'lines.*.unit_price' => ['required', 'numeric', 'min:0', 'max:10000000', 'regex:/^\d+(\.\d{1,2})?$/']];
     }
 
     public function attributes(): array
     {
         return trans('validation.attributes');
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator) {
+            // Legacy clients did not send vehicle-level lines, so retain their
+            // original duplicate-item validation contract.
+            if ($this->has('vehicles')) {
+                return;
+            }
+            $seen = [];
+            foreach ($this->input('lines', []) as $index => $line) {
+                $itemId = $line['item_id'] ?? null;
+                if ($itemId !== null && isset($seen[$itemId])) {
+                    $validator->errors()->add("lines.{$seen[$itemId]}.item_id", 'لا يمكن تكرار الصنف في الطلب.');
+                    $validator->errors()->add("lines.$index.item_id", 'لا يمكن تكرار الصنف في الطلب.');
+                }
+                $seen[$itemId] = $index;
+            }
+        });
     }
 }

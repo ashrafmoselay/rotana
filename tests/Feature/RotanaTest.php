@@ -449,6 +449,8 @@ class RotanaTest extends TestCase
         $incoming = $this->createStockMovementForWarehouse(2, ['item_id' => $item->id, 'type' => 'transfer', 'destination_warehouse_id' => 1]);
         $balanceOnly = Item::create(['sku' => 'REPORT-ZERO', 'name' => 'رصيد صفر', 'unit' => 'قطعة', 'track_stock' => true]);
         StockBalance::create(['warehouse_id' => 1, 'item_id' => $balanceOnly->id, 'quantity_milli' => 0]);
+        $available = Item::create(['sku' => 'REPORT-AVAILABLE', 'name' => 'رصيد متاح', 'unit' => 'قطعة', 'track_stock' => true]);
+        StockBalance::create(['warehouse_id' => 1, 'item_id' => $available->id, 'quantity_milli' => 1000]);
         $foreignOnly = Item::create(['sku' => 'REPORT-FOREIGN', 'name' => 'صنف خارج المخزن', 'unit' => 'قطعة', 'track_stock' => true]);
         $this->createStockMovementForWarehouse(2, ['item_id' => $foreignOnly->id]);
 
@@ -457,6 +459,10 @@ class RotanaTest extends TestCase
         $this->assertContains($item->id, $ids);
         $this->assertContains($balanceOnly->id, $ids);
         $this->assertNotContains($foreignOnly->id, $ids);
+        $availableIds = collect($this->getJson('/api/inventory/items?warehouse_id=1&available=1')->assertOk()->json())->pluck('id');
+        $this->assertContains($available->id, $availableIds);
+        $this->assertNotContains($balanceOnly->id, $availableIds);
+        $this->assertNotContains($item->id, $availableIds);
         $this->getJson('/api/inventory/items?warehouse_id=2')->assertForbidden();
         $rows = $this->stockMovementsDataTable(['warehouse_id' => 1, 'item_id' => $item->id])->assertOk()->json('data');
         $this->assertEqualsCanonicalizing([$local->id, $incoming->id], array_column($rows, 'id'));
@@ -604,7 +610,7 @@ class RotanaTest extends TestCase
     public function test_excel_import_rolls_back_all_rows_on_failure(): void
     {
         $before = Item::count();
-        $csv = "name,unit,track_stock,unit_cost,minimum\nValid,piece,1,12.50,2\nInvalid,piece,1,20,not-a-number\n";
+        $csv = "sku,name,unit,track_stock,unit_cost,minimum\nNEW-VALID,Valid,piece,1,12.50,2\nNEW-INVALID,Invalid,piece,1,20,not-a-number\n";
         $file = UploadedFile::fake()->createWithContent('items.csv', $csv);
         $this->postJson('/api/excel/import/items', ['file' => $file])->assertUnprocessable();
         $this->assertEquals($before, Item::count());
@@ -631,14 +637,12 @@ class RotanaTest extends TestCase
         $this->putJson('/api/admin/users/'.$u->id, ['name' => $u->name, 'email' => $u->email, 'active' => false, 'all_branches' => true, 'roles' => ['admin'], 'branch_ids' => []])->assertUnprocessable();
     }
 
-    public function test_vehicle_order_requires_all_nine_photos(): void
+    public function test_vehicle_order_can_be_submitted_without_photos(): void
     {
         $o = PurchaseOrder::where('category', 'maintenance')->first();
         $o->update(['status' => 'draft']);
         $m = $o->getFirstMedia('photos_before');
         $m->delete();
-        $this->postJson('/api/orders/'.$o->id.'/actions/submit')->assertUnprocessable();
-        $this->postJson('/api/orders/'.$o->id.'/media', ['collection' => 'photos_before', 'label' => 'front', 'file' => UploadedFile::fake()->image('front.jpg')])->assertCreated();
         $this->postJson('/api/orders/'.$o->id.'/actions/submit')->assertOk();
     }
 
@@ -697,9 +701,9 @@ class RotanaTest extends TestCase
         $this->assertTrue($u->hasRole('employee'));
         $this->assertFalse($u->mayAccessBranch(2));
         $this->postJson('/api/admin/roles', ['name' => 'custom-reader', 'permissions' => ['orders.view']])->assertCreated();
-        $file = UploadedFile::fake()->createWithContent('items.csv', "name,unit,track_stock,unit_cost,minimum\nNew item,piece,1,12.50,2\n");
+        $file = UploadedFile::fake()->createWithContent('items.csv', "sku,name,unit,track_stock,unit_cost,minimum\nNEW-OK,New item,piece,1,12.50,2\n");
         $this->postJson('/api/excel/import/items', ['file' => $file])->assertOk()->assertJsonPath('rows', 1);
-        $this->assertDatabaseHas('items', ['name' => 'New item', 'unit_cost_minor' => 1250]);
+        $this->assertDatabaseHas('items', ['sku' => 'NEW-OK', 'unit_cost_minor' => 1250]);
     }
 
     public function test_cannot_approve_own_request_without_explicit_permission(): void
